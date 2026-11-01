@@ -76,7 +76,7 @@ const FAKE_SB = `(() => {
 
   const cfg = await runFn('config.js');
   ok('A1 api/config returns real Supabase project + publishable key, AI on, no secret', cfg.out.supabaseUrl === 'https://pugkpvtdcnpwrvmtbamz.supabase.co' && /^sb_publishable_/.test(cfg.out.supabaseKey) && cfg.out.ai === true && !JSON.stringify(cfg.out).includes('sk-test'), JSON.stringify(cfg.out));
-  const browser = await chromium.launch(); const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, acceptDownloads: true });
+  const browser = await chromium.launch(); const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, acceptDownloads: true, timezoneId: 'Asia/Kolkata' });
   const NM = path.join(__dirname, 'node_modules'); const LIB = { 'chart.umd.min.js': 'chart.js/dist/chart.umd.js', 'xlsx.full.min.js': 'xlsx/dist/xlsx.full.min.js', 'jspdf.umd.min.js': 'jspdf/dist/jspdf.umd.min.js', 'jspdf.plugin.autotable.min.js': 'jspdf-autotable/dist/jspdf.plugin.autotable.min.js', 'pdf.min.js': 'pdfjs-dist/build/pdf.min.js', 'pdf.worker.min.js': 'pdfjs-dist/build/pdf.worker.min.js' };
   await ctx.route('**/*', async r => {
     const u = new URL(r.request().url());
@@ -115,6 +115,9 @@ const FAKE_SB = `(() => {
     const fid = await ev(() => { const its = S.orders.flatMap(o => o.items); const ph = {}; S.batches.forEach(b => { const k = phaseLabel(b); ph[k] = (ph[k] || 0) + 1; });
       return { rows: its.filter(i => i.row).length, coa: its.filter(i => i.row && i.row.coaDate !== '').length, bno: its.filter(i => i.row && i.row.batchNo !== '').length, ready: its.filter(i => i.row && /^ready$/i.test(i.row.plannedReady)).length,
         sheetIds: S.batches.filter(b => /^\d{2}[A-Z]{3,6}\d{2,4}/.test(b.id)).length, coaRel: S.batches.filter(b => b.coa.status === 'Released').length, disp: S.batches.filter(b => b.shipments.some(x => x.status === 'Dispatched')).length, hold: S.projects.filter(p => p.status === 'On Hold').length, awaited: S.orders.filter(o => o.materialStatus === 'Awaited').length, ph }; });
+    const SD = JSON.parse(fs.readFileSync(path.join(__dirname, 'sheet-dates.json')));
+    const bad = await ev(SD => { const b = []; S.orders.forEach(o => { const e = SD[`${o.poNo}|${o.soNo || ''}`.toLowerCase()]; if (!e) return; ['poDate', 'soDate', 'exPlant', 'rowDelivery'].forEach(k => { if (e[k] && o[k] !== e[k]) b.push(`${o.poNo} ${k} ${o[k]} vs ${e[k]}`); }); }); return b; }, SD);
+    ok('C5 dates exactly as in the sheet (PO, SO, ex-plant, raw delivery) in IST', bad.length === 0, bad.length + ' mismatches ' + bad.slice(0, 3).join('; '));
     ok('C4 every sheet row kept with its own values; stages follow the sheet', fid.rows === 972 && fid.coa === 72 && fid.bno === 312 && fid.sheetIds > 250 && fid.coaRel > 50 && fid.disp >= 3, JSON.stringify(fid));
     ok('D1 after reload, data loads from Supabase', await ev(() => S.orders.length === 793 && S.batches.length === 986 && S.projects.length === 793));
     await page.click('[data-nav="ppc"]'); await wait(800); ok('D2 PPC lists the sheet orders', await page.locator('#view tbody tr.click').count() > 100);

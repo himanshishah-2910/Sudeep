@@ -282,8 +282,10 @@ ${text || '(scanned document — read the attached PDF / page images)'}`;
 /* ---------- Excel import: sheet rows grouped into multi-product orders by PO + SO ---------- */
 const HMAP = { month: 'month', planningteamremarks: 'planRemarks', exportdomestic: 'orderType', unitpr: 'unit', salesperson: 'salesPerson', ponumber: 'poNo', podate: 'poDate', sonumber: 'soNo', sodate: 'soDate', soupdatedate: 'soUpdate', explantdate: 'exPlant', rowdeliverydate: 'rowDelivery', rawdeliverydate: 'rowDelivery', plannedreadinessdate: 'plannedReady', customername: 'customer', locationcountry: 'location', productcode: 'productCode', grade: 'grade', productname: 'productName', poquantitykgs: 'poQty', openquantitykgs: 'openQty', marketingremarks: 'mktRemarks', remarksspecialrequirement: 'specialReq', packing: 'packing', palletformation: 'pallet', tentativesamplingdate: 'tentSampling', actualsamplingdate: 'actSampling', batchnumber: 'batchNo', coareleaseddate: 'coaDate', readinessdateofsudeep: 'plannedReady', actaulreadinessdate: 'actualReady', actualreadinessdate: 'actualReady', actauldispatchdate: 'actualDispatch', actualdispatchdate: 'actualDispatch', remarksplanningteam: 'planRemarks2', noofsotoinvoicedays: 'soToInvoiceDays', opendispatchclosedonhold: 'status', invoiceno: 'invoiceNo', invoicedate: 'invoiceDate', shiptocode: 'shipToName', incoterms: 'incoterms', portofdischarge: 'port', typeofshipmentseaair: 'shipmentType', containersize: 'containerSize', paymentterms: 'paymentTerms' };
 const DATEK = new Set(['poDate', 'soDate', 'soUpdate', 'exPlant', 'rowDelivery', 'tentSampling', 'actSampling', 'coaDate', 'plannedReady', 'actualReady', 'actualDispatch', 'invoiceDate']);
+/* Excel stores dates as day serials; read the calendar day straight from the serial so the browser's time zone can never shift it by a day */
+function xlDate(k, v) { if (typeof v === 'number' && (DATEK.has(k) || k === 'month') && v > 20000 && v < 80000) { const d = XLSX.SSF.parse_date_code(v); return `${d.y}-${pad(d.m)}-${pad(d.d)}`; } return v; }
 function normCell(k, v) {
-  if (v === null || v === undefined) return '';
+  if (v === null || v === undefined) return ''; v = xlDate(k, v); if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return k === 'month' ? v.slice(0, 7) : v;
   if (DATEK.has(k) || k === 'month') { if (v instanceof Date) return k === 'month' ? iso(v).slice(0, 7) : iso(v); const m = String(v).trim().match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})$/); if (m) { const y = m[3].length === 2 ? '20' + m[3] : m[3]; return k === 'month' ? `${y}-${pad(m[2])}` : `${y}-${pad(m[2])}-${pad(m[1])}`; } return k === 'month' ? String(v).trim() : ''; }
   if (k === 'poQty' || k === 'openQty') return +String(v).replace(/[^\d.]/g, '') || 0;
   let s = String(v).trim(); if (['-', '#NAME?', 'NA'].includes(s)) s = '';
@@ -293,7 +295,7 @@ function normCell(k, v) {
 }
 /* the sheet's own value for one product row, kept as typed: dates become ISO only when they really are dates */
 function rawCell(k, v) {
-  if (v === null || v === undefined) return '';
+  if (v === null || v === undefined) return ''; v = xlDate(k, v); if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return k === 'month' ? v.slice(0, 7) : v;
   if (v instanceof Date) return k === 'month' ? iso(v).slice(0, 7) : iso(v);
   if (typeof v === 'number') return v;
   const s = String(v).replace(/\s+/g, ' ').trim();
@@ -307,7 +309,7 @@ ACT.importSheet = (el, presetFile) => {
     onOpen: md => { const parse = async f => {
       if (!f) return; const out = $('#imp', md); out.innerHTML = `<span class="muted">Reading ${esc(f.name || 'sheet')}…</span>`;
       try {
-        const wb = XLSX.read(await f.arrayBuffer(), { cellDates: true }); const ws = wb.Sheets[wb.SheetNames[0]]; const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null });
+        const wb = XLSX.read(await f.arrayBuffer(), { cellDates: false }); const ws = wb.Sheets[wb.SheetNames[0]]; const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null });
         const hi = aoa.findIndex(r => r && r.some(c => /customer\s*name/i.test(String(c || '')))); if (hi < 0) throw new Error('No "Customer Name" header row found.');
         const keys = aoa[hi].map(h => HMAP[String(h || '').toLowerCase().replace(/[^a-z0-9]/g, '')] || null);
         const have = new Set(S.orders.map(o => `${o.poNo}|${o.soNo || ''}`.toLowerCase()));
