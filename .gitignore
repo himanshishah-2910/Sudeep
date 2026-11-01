@@ -1,0 +1,8 @@
+node_modules/
+public/
+.vercel/
+.env*
+tests/e2e/out/
+tests/e2e/node_modules
+*.log
+.DS_Store

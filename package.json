@@ -1,0 +1,13 @@
+{
+  "name": "ordertrack",
+  "version": "2.0.0",
+  "private": true,
+  "description": "OrderTrack — manufacturing order-to-dispatch project management (orders, PPC, manufacturing, QC, QA, dispatch, masters, AI assistant).",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "node scripts/build.mjs && node --check public/app.js",
+    "test:e2e": "node scripts/build.mjs && node tests/e2e/run.js"
+  },
+  "engines": { "node": ">=18" }
+}

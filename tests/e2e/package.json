@@ -1,0 +1,7 @@
+{
+  "name": "ordertrack-e2e",
+  "private": true,
+  "description": "End-to-end tests (Playwright). Kept separate so Vercel builds stay lean.",
+  "scripts": { "fixtures": "node make-fixtures.cjs", "test": "node make-fixtures.cjs && node run.js" },
+  "devDependencies": { "playwright": "1.47.2", "chart.js": "4.4.1", "xlsx": "0.18.5", "jspdf": "2.5.1", "jspdf-autotable": "3.8.2", "pdfjs-dist": "3.11.174" }
+}
