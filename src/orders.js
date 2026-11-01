@@ -92,7 +92,7 @@ OPEN.order = id => {
     const prev = id ? O(id) : null; const prevItems = prev ? items(prev) : [];
     let n = 0; its2.forEach(i => { if (!i.id || its2.filter(x => x.id === i.id).length > 1) i.id = ''; });
     its2.forEach(i => { if (!i.id) { do { n++; } while (its2.some(x => x.id === 'L' + n) || prevItems.some(x => x.id === 'L' + n)); i.id = 'L' + n; } if (i.openQty === '' || i.openQty === undefined) i.openQty = i.poQty; i.nBatches = Math.max(1, Math.min(20, Math.round(+i.nBatches || 1))); });
-    const lockedIds = Object.keys(bc); const keep = prevItems.filter(i => lockedIds.includes(i.id) && !its2.some(x => x.id === i.id));
+    its2.forEach((i, k) => { const p0 = prevItems.find(p => p.id === i.id); if (p0) its2[k] = Object.assign({}, p0, i); }); const lockedIds = Object.keys(bc); const keep = prevItems.filter(i => lockedIds.includes(i.id) && !its2.some(x => x.id === i.id));
     const no = Object.assign(o, r, { items: [...keep, ...its2] }); delete no._batches; no.items.forEach(i => delete i._batches);
     if (!no.id) { no.id = nextId('ORD-', S.orders, 2601); no.createdAt = TODAY; }
     if (pendingPdf) no.docs = (no.docs || []).concat([pendingPdf]);
@@ -126,7 +126,34 @@ function startOrder(oid, quiet) {
   if (!quiet && made) toast(`${oRef(o)} started: ${made} batches`);
   return pid;
 }
+/* ---------- where a sheet row says the product is today ---------- */
+const RANK = { order: 0, material: 1, mfg: 2, qc: 3, qa: 4, ready: 5, dispatch: 6, done: 7 };
+const isoIn = v => { const s = String(v || ''); if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s; const m = s.match(/(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4}|\d{2})\b/); return m && +m[2] <= 12 ? `${m[3].length === 2 ? '20' + m[3] : m[3]}-${pad(m[2])}-${pad(m[1])}` : ''; };
+function sheetBatches(cell, qty) {
+  const s = String(cell || '').toUpperCase(); const re = /\b(\d{2}[A-Z]{3,6}\d{2,4})\b\s*(?:-+\s*([\d.]+)\s*(MT|KG)?)?/g; const out = []; let m;
+  while ((m = re.exec(s))) { let q = m[2] ? +m[2] : 0; if (q && m[3] === 'MT') q *= 1000; out.push({ code: m[1], qty: q }); }
+  if (!out.length) return [];
+  const known = sum(out, b => b.qty); if (!(known > 0 && out.every(b => b.qty > 0))) { const each = Math.round(qty / out.length); out.forEach((b, k) => b.qty = k < out.length - 1 ? each : qty - each * (out.length - 1)); }
+  return out;
+}
+function sheetPlan(o, it) {
+  const r = it.row; if (!r) return null; const t = v => String(v || '').trim();
+  const rmPending = /RM\s*PENDING|RM\s*EXPECTED/i.test(t(r.batchNo) + ' ' + t(r.actualDispatch));
+  const coaTxt = t(r.coaDate), coaDone = /COA\s*(DONE|RELEASE|ALREADY)/i.test(coaTxt) || /^\d{4}-\d{2}-\d{2}$/.test(coaTxt), coaQA = /COA\s*(SENT|SUBMITTED)/i.test(coaTxt);
+  const dispatched = !!isoIn(r.actualDispatch) || /dispat?c/i.test(t(r.actualDispatch)) || !!t(r.invoiceNo);
+  const ready = /^ready$/i.test(t(r.plannedReady)) || !!isoIn(r.actualReady);
+  const sampled = !!t(r.actSampling) && !/pending/i.test(t(r.actSampling));
+  const codes = sheetBatches(r.batchNo, +it.openQty || +it.poQty || 0);
+  let target = dispatched ? 'done' : (ready || coaDone) ? 'ready' : coaQA ? 'qa' : (sampled || /SAMPLING PENDING|NOT COMPLIES/i.test(coaTxt)) ? 'qc' : (codes.length || t(r.tentSampling)) ? 'mfg' : 'material';
+  if (rmPending && RANK[target] <= RANK.mfg) target = 'material';
+  const coaDate = isoIn(coaTxt);
+  return { target, codes, rmPending, coaDone: coaDone || ready || dispatched, coaDate, hold: /hold/i.test(t(r.month)),
+    dates: { mfg: isoIn(r.actSampling), qc: coaDate, qa: coaDate, ready: isoIn(r.actualReady), dispatch: isoIn(r.actualDispatch) || isoIn(r.invoiceDate) },
+    planned: { mfg: isoIn(r.tentSampling), ready: isoIn(r.plannedReady) }, note: /NOT COMPLIES/i.test(coaTxt) ? 'Sheet COA column: NOT COMPLIES' : '' };
+}
+const freeBatchId = (code, used) => { const c = code.replace(/[^A-Z0-9-]/gi, ''); if (!used.has(c)) return c; let k = 2; while (used.has(`${c}-${k}`)) k++; return `${c}-${k}`; };
 function createBatchesForItem(o, it, pid, nOverride) {
+  const plan = !nOverride && sheetPlan(o, it); if (plan) return createSheetBatches(o, it, pid, plan);
   const n = Math.max(1, nOverride || it.nBatches || 1); const qty = +(it.openQty === '' || it.openQty === undefined ? it.poQty : it.openQty) || +it.poQty || 0;
   const line = it.line || unitToLine(o.unit); const tpl = tplById(it.tplId);
   const parts = Array.from({ length: n }, (_, k) => k < n - 1 ? Math.round(qty / n) : qty - Math.round(qty / n) * (n - 1));
@@ -139,6 +166,41 @@ function createBatchesForItem(o, it, pid, nOverride) {
     put('batches', normalizeBatch({ id: bid, projectId: pid, itemId: it.id, qty: q, line, tplId: tpl.id, plannedStart: mfg.planned || addDays(start, 2), plannedEnd: addDays(mfg.planned || start, 2), actualStart: '', actualEnd: '', materialIn: '', mfgDetails: '', produced: 0, prodLog: [], remarks: '', materialInDate: addDays(start, 1), qcPlanned: (stages.find(s => s.type === 'qc') || {}).planned || '', qaPlanned: (stages.find(s => s.type === 'qa') || {}).planned || '', expDispatch: (stages.find(s => s.type === 'dispatch') || {}).planned || '', resource: '', stages, reworks: [], qcTests: [], qa: { status: 'Not Started', checks: M('qachecks').map(c => ({ name: c.name, ok: false })), docs: [] }, coa: { status: 'Not Started', docs: [] }, shipments: [], history: [{ at: TODAY, ts: nowISO(), text: `Batch created for ${it.productName || it.productCode} (${kg(q)} kg) on ${line} using “${tpl.name}”` }], docs: [] }));
   });
   return n;
+}
+function createSheetBatches(o, it, pid, plan) {
+  const qty = +(it.openQty === '' || it.openQty === undefined ? it.poQty : it.openQty) || +it.poQty || 0;
+  const line = it.line || unitToLine(o.unit); const tpl = tplById(it.tplId);
+  const used = new Set(S.batches.map(b => b.id));
+  const parts = plan.codes.length ? plan.codes : [{ code: '', qty }];
+  const shipIds = new Set(S.batches.flatMap(x => (x.shipments || []).map(s => s.id))); let shipN = 3000;
+  parts.forEach((p, k) => {
+    const q = p.qty || 0; const start = TODAY; const stages = buildStages(tpl, line, q, start);
+    if (plan.planned.mfg) stages.filter(s => s.type === 'mfg').forEach(s => s.planned = plan.planned.mfg);
+    if (plan.planned.ready) stages.filter(s => s.type === 'ready').forEach(s => s.planned = plan.planned.ready);
+    let cur = stages.findIndex(s => s.type !== 'order' && RANK[s.type] !== undefined && RANK[s.type] >= RANK[plan.target]);
+    if (plan.target === 'done') cur = stages.length;
+    if (cur < 0) cur = stages.findIndex(s => s.type !== 'order');
+    stages.forEach((s, i) => { if (i < cur) { s.status = 'done'; s.done = s.alloc; s.actual = s.type === 'order' ? (o.soDate || o.poDate || '') : (plan.dates[s.type] || ''); s.person = 'Order sheet'; s.completedAt = nowISO(); if (s.actual && s.planned > s.actual) s.planned = s.actual; } });
+    if (cur < stages.length) { startStage(stages[cur]); if (plan.note && stages[cur].type === 'qc') stages[cur].comment = plan.note; }
+    const id = p.code ? freeBatchId(p.code, used) : nextId(line + '-', S.batches, 2700); used.add(id);
+    const mfgS = stages.find(s => s.type === 'mfg') || {}; const mfgDone = mfgS.status === 'done';
+    const b = { id, projectId: pid, itemId: it.id, qty: q, line, tplId: tpl.id, sheetBatchNo: it.batchNo || '', plannedStart: mfgS.planned || addDays(start, 2), plannedEnd: addDays(mfgS.planned || start, 2), actualStart: '', actualEnd: mfgDone ? (mfgS.actual || '') : '', materialIn: plan.rmPending ? '' : (RANK[plan.target] > RANK.material ? 'Raw material received' : ''), mfgDetails: '', produced: mfgDone ? q : 0, prodLog: [], remarks: plan.rmPending ? 'Order sheet: raw material pending' : '', materialInDate: addDays(start, 1),
+      qcPlanned: (stages.find(s => s.type === 'qc') || {}).planned || '', qaPlanned: (stages.find(s => s.type === 'qa') || {}).planned || '', expDispatch: (stages.find(s => s.type === 'dispatch') || {}).planned || '', resource: '', stages, reworks: [], qcTests: [],
+      qa: { status: plan.coaDone ? 'Approved' : 'Not Started', checks: M('qachecks').map(c => ({ name: c.name, ok: !!plan.coaDone })), docs: [] }, coa: plan.coaDone ? { status: 'Released', date: plan.coaDate || plan.dates.ready || '', docs: [] } : { status: 'Not Started', docs: [] }, shipments: [],
+      history: [{ at: TODAY, ts: nowISO(), text: `Batch created from the order sheet for ${it.productName || it.productCode} (${kg(q)} kg) on ${line}${it.batchNo ? ` · sheet batch “${it.batchNo}”` : ''} · now at ${plan.target === 'done' ? 'Dispatched' : PHASE[plan.target]}` }], docs: [] };
+    if (plan.target === 'done') { while (shipIds.has('SH-' + shipN)) shipN++; shipIds.add('SH-' + shipN); const r = it.row || {};
+      b.shipments.push({ id: 'SH-' + shipN, qty: q, invoiceNo: String(r.invoiceNo || ''), invoiceDate: isoIn(r.invoiceDate), containerNo: '', containerSize: o.containerSize || '', containers: 1, booking: '', vehicle: '', dispatchDate: plan.dates.dispatch || '', status: 'Dispatched', remarks: String(r.actualDispatch || ''), docs: [] }); }
+    put('batches', normalizeBatch(b));
+  });
+  return parts.length;
+}
+/* after a sheet import: order status, material and hold follow the sheet */
+function applySheetState(oid) {
+  const o = clone(O(oid)); if (!o || !o.projectId) return; const plans = items(o).map(i => sheetPlan(o, i)).filter(Boolean); if (!plans.length) return;
+  if (plans.some(p => p.rmPending)) o.materialStatus = 'Awaited';
+  if (plans.every(p => p.target === 'done')) o.status = 'Dispatched';
+  if (plans.some(p => p.hold)) { o.status = 'On Hold'; const p = clone(P(o.projectId)); if (p) { p.status = 'On Hold'; put('projects', p); } }
+  put('orders', o);
 }
 ACT.startOrder = el => { startOrder(el.dataset.o); };
 ACT.startAll = () => { const ids = S.orders.filter(o => !o.projectId).map(o => o.id); confirmBox('Start imported orders', `Start workflows for <b>${ids.length}</b> imported orders? Each product gets one batch on its line with the default workflow.`, 'Start all', () => { ids.forEach(id => startOrder(id, true)); toast(`${ids.length} orders started`); }, 'ok'); };
@@ -229,6 +291,15 @@ function normCell(k, v) {
   if (k === 'status') s = /dispatch/i.test(s) ? 'Dispatched' : /close/i.test(s) ? 'Closed' : /hold/i.test(s) ? 'On Hold' : 'Open';
   return s;
 }
+/* the sheet's own value for one product row, kept as typed: dates become ISO only when they really are dates */
+function rawCell(k, v) {
+  if (v === null || v === undefined) return '';
+  if (v instanceof Date) return k === 'month' ? iso(v).slice(0, 7) : iso(v);
+  if (typeof v === 'number') return v;
+  const s = String(v).replace(/\s+/g, ' ').trim();
+  if (DATEK.has(k)) { const m = s.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})$/); if (m && +m[2] >= 1 && +m[2] <= 12 && +m[1] >= 1) { const y = m[3].length === 2 ? '20' + m[3] : m[3]; return `${y}-${pad(m[2])}-${pad(m[1])}`; } }
+  return s;
+}
 ACT.importSheet = (el, presetFile) => {
   let parsed = [];
   openModal({ title: 'Import order sheet', wide: true, body: `<p style="margin:0">Choose the Excel order sheet (.xlsx). Columns are matched by header name. Rows with the same PO and SO become one order with several products. Orders already in OrderTrack (same PO + SO) are skipped.</p>
@@ -241,17 +312,17 @@ ACT.importSheet = (el, presetFile) => {
         const keys = aoa[hi].map(h => HMAP[String(h || '').toLowerCase().replace(/[^a-z0-9]/g, '')] || null);
         const have = new Set(S.orders.map(o => `${o.poNo}|${o.soNo || ''}`.toLowerCase()));
         const groups = new Map(); let dupRows = 0, rowsN = 0;
-        aoa.slice(hi + 1).forEach(r => { if (!r) return; const x = {}; keys.forEach((k, i) => { if (k && !(k in x && x[k])) x[k] = normCell(k, r[i]); }); if (!x.customer) return; rowsN++;
+        aoa.slice(hi + 1).forEach(r => { if (!r) return; const x = {}, raw = {}; keys.forEach((k, i) => { if (k && !(k in x && x[k])) { x[k] = normCell(k, r[i]); raw[k] = rawCell(k, r[i]); } }); if (!x.customer) return; rowsN++;
           x.poNo = x.poNo || ('NO-PO-' + (x.soNo || rowsN)); const key = `${x.poNo}|${x.soNo || ''}`.toLowerCase(); if (have.has(key)) { dupRows++; return; }
           if (!groups.has(key)) { const o = { items: [] }; Object.keys(x).forEach(k => { if (!ITEM_KEYS.includes(k)) o[k] = x[k]; }); o.materialStatus = 'Available'; groups.set(key, o); }
-          const o = groups.get(key); const it = { id: 'L' + (o.items.length + 1), tplId: '', line: unitToLine(x.unit), nBatches: 1 }; ITEM_KEYS.forEach(k => it[k] = x[k] ?? ''); it.poQty = +it.poQty || 0; it.openQty = it.openQty === '' ? it.poQty : +it.openQty || 0; o.items.push(it); });
+          const o = groups.get(key); const it = { id: 'L' + (o.items.length + 1), tplId: '', line: unitToLine(x.unit), nBatches: 1 }; ITEM_KEYS.forEach(k => it[k] = x[k] ?? ''); it.batchNo = raw.batchNo === undefined ? it.batchNo : String(raw.batchNo); it.row = raw; it.poQty = +it.poQty || 0; it.openQty = it.openQty === '' ? it.poQty : +it.openQty || 0; o.items.push(it); });
         parsed = [...groups.values()];
         out.innerHTML = `<div class="kvs"><div><dt>Orders ready</dt><dd class="num big">${parsed.length}</dd></div><div><dt>Product lines</dt><dd class="num big">${sum(parsed, o => o.items.length)}</dd></div><div><dt>Rows skipped (already in OrderTrack)</dt><dd class="num big">${dupRows}</dd></div><div><dt>Multi-product orders</dt><dd class="num big">${parsed.filter(o => o.items.length > 1).length}</dd></div></div>
           ${parsed.length > 2000 ? `<p class="banner">Only the first 2000 orders will be imported in one go; run the import again for the rest.</p>` : ''}
           <div class="kvs"><div><dt>Sheet status Open / blank</dt><dd class="num big">${parsed.filter(o => !['Dispatched', 'Closed', 'On Hold'].includes(o.status)).length}</dd></div><div><dt>Dispatched / Closed</dt><dd class="num big">${parsed.filter(o => ['Dispatched', 'Closed'].includes(o.status)).length}</dd></div><div><dt>On hold</dt><dd class="num big">${parsed.filter(o => o.status === 'On Hold').length}</dd></div></div>
           <label class="row" style="font-size:14px"><input type="checkbox" id="imM" checked style="width:auto"> Add new customers, products, grades, salespersons, packing types, ports, incoterms and payment terms to Master Data</label>
-          <label class="row" style="font-size:14px"><input type="checkbox" id="imS" checked style="width:auto"> Start workflows now for orders the sheet marks Open (creates their batches so they show in PPC and the departments)</label>
-          <p class="muted" style="margin:0;font-size:13px">Every column keeps the sheet's value. Orders the sheet marks Dispatched or Closed are kept as records with that status; On Hold orders stay on hold.</p>`;
+          <label class="row" style="font-size:14px"><input type="checkbox" id="imS" checked style="width:auto"> Start workflows now (each product's batches start at the stage the sheet shows: material, manufacturing, QC, QA, ready or dispatched)</label>
+          <p class="muted" style="margin:0;font-size:13px">Every product row keeps all of its own sheet values exactly as typed. The sheet's batch numbers become the batch IDs. Orders marked Hold stay on hold.</p>`;
       } catch (err) { out.innerHTML = `<div class="alert s-rejected">Could not read this file: ${esc(err.message)}</div>`; }
     }; $('#imf', md).addEventListener('change', e => parse(e.target.files[0])); if (presetFile) parse(presetFile); },
     actions: [{ label: 'Import orders', run: md => {
@@ -260,7 +331,7 @@ ACT.importSheet = (el, presetFile) => {
       if (addM) mergeMasters(rows);
       let n = +nextId('ORD-', S.orders, 2601).split('-')[1];
       rows.forEach(o => { o.id = 'ORD-' + (n++); o.createdAt = TODAY; o.items.forEach(i => { i.tplId = i.tplId || tplById('').id; }); put('orders', o); });
-      let started = 0; if (startNow) rows.filter(o => !['Dispatched', 'Closed', 'On Hold'].includes(o.status)).forEach(o => { startOrder(o.id, true); started++; });
+      let started = 0; if (startNow) rows.filter(o => o.status !== 'Closed').forEach(o => { startOrder(o.id, true); applySheetState(o.id); started++; });
       log(`Order sheet imported: ${rows.length} orders, ${sum(rows, o => o.items.length)} product lines${started ? `, ${started} started` : ''}`, ''); toast(`${rows.length} orders imported${started ? ` · ${started} started` : ''}`); FLT.orders.tab = 'all'; go('orders');
     } }] });
 };
@@ -275,7 +346,9 @@ function mergeMasters(rows) {
 }
 
 /* ---------- export in the original order-sheet layout (one row per product) ---------- */
-const SHEET_COLS = [['MONTH', o => o.month], ['Planning Team Remarks', o => o.planRemarks], ['Export/ Domestic', o => o.orderType], ['UNIT / PR', o => o.unit], ['Sales Person', o => o.salesPerson], ['PO Number', o => o.poNo], ['PO Date', o => o.poDate], ['SO number', o => o.soNo], ['SO Date', o => o.soDate], ['SO update date', o => o.soUpdate], ['Ex Plant Date', o => o.exPlant], ['Raw Delivery Date', o => o.rowDelivery], ['Customer Name', o => o.customer], ['Location / Country', o => o.location], ['Product Code', (o, i) => i.productCode], ['GRADE', (o, i) => i.grade], ['Product Name', (o, i) => i.productName], ['PO Quantity (kgs)', (o, i) => +i.poQty || ''], ['Open Quantity (kgs)', (o, i) => +i.openQty || ''], ['MARKETING REMARKS', (o, i) => i.mktRemarks], ['Remarks/ special requirement', (o, i) => i.specialReq], ['Packing', (o, i) => i.packing], ['PALLET FORMATION', (o, i) => i.pallet], ['Tentative sampling date', o => o.tentSampling], ['Actual Sampling date', o => o.actSampling], ['Batch Number', (o, i) => o.projectId ? pBatches(o.projectId).filter(b => b.itemId === i.id).map(b => b.id).join(', ') : i.batchNo], ['COA RELEASED DATE', o => o.coaDate], ['Planned Readiness Date', o => o.plannedReady], ['Actual Readiness Date', o => o.actualReady], ['Actual Dispatch Date', o => o.actualDispatch], ['REMARKS PLANNING TEAM', o => o.planRemarks2], ['No. of SO to Invoice Days', o => o.soToInvoiceDays], ['Open/Dispatch/Closed/Onhold', o => orderState(o)], ['Invoice no.', o => o.invoiceNo], ['Invoice Date', o => o.invoiceDate], ['Ship-to Code', o => o.shipToName], ['Incoterms', o => o.incoterms], ['Port of Discharge', o => o.port], ['Type of shipment Sea/Air', o => o.shipmentType], ['CONTAINER SIZE', o => o.containerSize], ['Payment Terms', o => o.paymentTerms]];
+/* columns that differ from row to row inside one PO/SO come from that product's own sheet row */
+const rv = k => (o, i) => { const r = i.row || {}; return items(o).length > 1 && r[k] !== undefined && r[k] !== '' ? r[k] : (o[k] || r[k] || ''); };
+const SHEET_COLS = [['MONTH', rv('month')], ['Planning Team Remarks', rv('planRemarks')], ['Export/ Domestic', o => o.orderType], ['UNIT / PR', o => o.unit], ['Sales Person', o => o.salesPerson], ['PO Number', o => o.poNo], ['PO Date', o => o.poDate], ['SO number', o => o.soNo], ['SO Date', o => o.soDate], ['SO update date', o => o.soUpdate], ['Ex Plant Date', rv('exPlant')], ['Raw Delivery Date', rv('rowDelivery')], ['Customer Name', o => o.customer], ['Location / Country', o => o.location], ['Product Code', (o, i) => i.productCode], ['GRADE', (o, i) => i.grade], ['Product Name', (o, i) => i.productName], ['PO Quantity (kgs)', (o, i) => +i.poQty || ''], ['Open Quantity (kgs)', (o, i) => +i.openQty || ''], ['MARKETING REMARKS', (o, i) => i.mktRemarks], ['Remarks/ special requirement', (o, i) => i.specialReq], ['Packing', (o, i) => i.packing], ['PALLET FORMATION', (o, i) => i.pallet], ['Tentative sampling date', rv('tentSampling')], ['Actual Sampling date', rv('actSampling')], ['Batch Number', (o, i) => i.row || !o.projectId ? i.batchNo : pBatches(o.projectId).filter(b => b.itemId === i.id).map(b => b.id).join(', ')], ['COA RELEASED DATE', rv('coaDate')], ['Planned Readiness Date', rv('plannedReady')], ['Actual Readiness Date', rv('actualReady')], ['Actual Dispatch Date', rv('actualDispatch')], ['REMARKS PLANNING TEAM', rv('planRemarks2')], ['No. of SO to Invoice Days', rv('soToInvoiceDays')], ['Open/Dispatch/Closed/Onhold', o => orderState(o)], ['Invoice no.', rv('invoiceNo')], ['Invoice Date', rv('invoiceDate')], ['Ship-to Code', o => o.shipToName], ['Incoterms', o => o.incoterms], ['Port of Discharge', o => o.port], ['Type of shipment Sea/Air', o => o.shipmentType], ['CONTAINER SIZE', o => o.containerSize], ['Payment Terms', o => o.paymentTerms]];
 ACT.exportSheet = async () => {
   if (!DL) return; const rows = [SHEET_COLS.map(c => c[0])];
   S.orders.slice().sort(by(o => o.soDate || o.poDate || '', -1)).forEach(o => items(o).forEach(i => rows.push(SHEET_COLS.map(c => { const v = c[1](o, i); return v === undefined || v === null ? '' : v; }))));

@@ -48,9 +48,9 @@ async function setup(opts = {}) {
     if (local) return;
     if (!localStorage.getItem('fakedb')) localStorage.setItem('fakedb', seed);
     const st = JSON.parse(localStorage.getItem('fakedb')); const L = {};
-    const save = () => localStorage.setItem('fakedb', JSON.stringify(st));
+    let saveT = 0; const save = () => { clearTimeout(saveT); saveT = setTimeout(() => localStorage.setItem('fakedb', JSON.stringify(st)), 60); };
     const snap = c => { const docs = Object.entries(st[c] || {}).map(([id, d]) => ({ id, exists: true, data: () => d, metadata: {} })); return { docs, size: docs.length, empty: !docs.length, docChanges: () => [], metadata: {} }; };
-    const notify = c => setTimeout(() => (L[c] || []).forEach(f => f(snap(c))), 5);
+    const nT = {}; const notify = c => { clearTimeout(nT[c]); nT[c] = setTimeout(() => (L[c] || []).forEach(f => f(snap(c))), 5); };
     window.__fakeWrite = (c, id, d) => { (st[c] = st[c] || {})[id] = d; save(); notify(c); };
     const q = c => ({ limit: () => q(c), orderBy: () => q(c), where: () => q(c), get: async () => snap(c), onSnapshot(fn) { (L[c] = L[c] || []).push(fn); setTimeout(() => fn(snap(c)), 10); return () => { }; },
       doc: id => ({ set: async d => { (st[c] = st[c] || {})[id] = JSON.parse(JSON.stringify(d)); save(); notify(c); }, delete: async () => { delete (st[c] || {})[id]; save(); notify(c); }, get: async () => ({ id, exists: !!(st[c] || {})[id], data: () => (st[c] || {})[id] }) }) });
@@ -70,6 +70,7 @@ async function setup(opts = {}) {
   }, [JSON.stringify(store), !!opts.local, PDFX]);
   page = await ctx.newPage(); consoleErrors = [];
   page.on('pageerror', e => consoleErrors.push(e.message));
+  page.on('crash', () => console.log('PAGE CRASHED'));
   page.on('console', m => { if (m.type() === 'error' && !/Failed to load resource/.test(m.text())) consoleErrors.push(m.text()); });
   await page.goto('https://ordertrack.test/#overview');
   await page.waitForSelector(opts.local ? '#view .view-in' : '.kpi', { timeout: 15000 }); await wait(400);
@@ -296,7 +297,7 @@ async function setup(opts = {}) {
     await page.click('[data-ftab="orders:open"]'); await wait(300);
     ok('12d bulk Start button offered', await page.locator('[data-act="startAll"]').count() === 1); const oid = await ev(() => S.orders.find(o => !o.projectId && o.items.length > 1).id); await ev(id => ACT.startOrder({ dataset: { o: id } }), oid); await wait(400);
     const s = await ev(oid => { const o = O(oid); return { pid: !!o.projectId, b: S.batches.filter(b => b.projectId === o.projectId).length, it: o.items.length }; }, oid);
-    ok('12c Start creates batches for every product', s.pid && s.b === s.it, JSON.stringify(s));
+    ok("12c Start creates batches for every product", s.pid && s.b >= s.it, JSON.stringify(s));
   });
   await test('13 Legacy order edit keeps values not yet in Master Data', async () => {
     const leg = await ev(() => { const o = S.orders.find(o => /^ORD-26(0|1|2)\d$/.test(o.id) && o.port && !M('ports').some(p => p.name === o.port) || false); return o ? o.id : (S.orders.find(o => o.paymentTerms) || {}).id; });

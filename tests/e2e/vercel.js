@@ -106,13 +106,17 @@ const FAKE_SB = `(() => {
     const t0 = Date.now(); await page.locator('.modal footer button', { hasText: 'Import orders' }).click();
     await page.waitForFunction(() => S.orders.length >= 793 && S.batches.length >= 972, null, { timeout: 120000 }); await wait(1500);
     const s1 = await sb(); const st = await ev(() => window.__sbStats);
-    ok('C2 all orders + started workflows written to Supabase', s1.orders === 793 && s1.projects === 793 && s1.batches === 972, JSON.stringify(s1) + ` in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+    ok('C2 all orders + started workflows written to Supabase', s1.orders === 793 && s1.projects === 793 && s1.batches === 986, JSON.stringify(s1) + ` in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
     ok('C3 writes batched (few requests for ~2,600 records)', st.upserts < 60, `${st.upserts} upsert requests, ${st.rows} rows`);
     const m = await ev(() => ({ c: M('customers').length, p: M('products').length, ports: M('ports').length })); ok('C4 masters built from the sheet', m.c === 367 && m.p === 331 && m.ports >= 60, JSON.stringify(m));
     ok('C5 seed offer gone once data exists', await page.locator('[data-act="loadSeed"]').count() === 0);
     // reload: everything comes back from the database
     await page.reload(); await page.waitForFunction(() => S.orders.length >= 793, null, { timeout: 30000 }); await wait(800);
-    ok('D1 after reload, data loads from Supabase', await ev(() => S.orders.length === 793 && S.batches.length === 972 && S.projects.length === 793));
+    const fid = await ev(() => { const its = S.orders.flatMap(o => o.items); const ph = {}; S.batches.forEach(b => { const k = phaseLabel(b); ph[k] = (ph[k] || 0) + 1; });
+      return { rows: its.filter(i => i.row).length, coa: its.filter(i => i.row && i.row.coaDate !== '').length, bno: its.filter(i => i.row && i.row.batchNo !== '').length, ready: its.filter(i => i.row && /^ready$/i.test(i.row.plannedReady)).length,
+        sheetIds: S.batches.filter(b => /^\d{2}[A-Z]{3,6}\d{2,4}/.test(b.id)).length, coaRel: S.batches.filter(b => b.coa.status === 'Released').length, disp: S.batches.filter(b => b.shipments.some(x => x.status === 'Dispatched')).length, hold: S.projects.filter(p => p.status === 'On Hold').length, awaited: S.orders.filter(o => o.materialStatus === 'Awaited').length, ph }; });
+    ok('C4 every sheet row kept with its own values; stages follow the sheet', fid.rows === 972 && fid.coa === 72 && fid.bno === 312 && fid.sheetIds > 250 && fid.coaRel > 50 && fid.disp >= 3, JSON.stringify(fid));
+    ok('D1 after reload, data loads from Supabase', await ev(() => S.orders.length === 793 && S.batches.length === 986 && S.projects.length === 793));
     await page.click('[data-nav="ppc"]'); await wait(800); ok('D2 PPC lists the sheet orders', await page.locator('#view tbody tr.click').count() > 100);
     await page.screenshot({ path: path.join(OUT, 'd2-ppc.png') });
     // edit from the dashboard
