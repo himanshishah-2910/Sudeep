@@ -1,5 +1,7 @@
 # Backend integration (database, files, AI)
 
+> **Status:** implemented in `src/backend.js` (Supabase table `ot_docs`, bucket `ordertrack`, Realtime) and `api/ai.js` (OpenAI gpt-4.1 via `open_ai_sudeep_key`). This page documents the interface for future changes.
+
 All screens reach the outside world through **one function**: `window.claude.use(name)`, which resolves to a capability object or `null`. On claude.ai the platform provides it. On your own domain, define `window.claude` yourself in a small script loaded **before** `app.js` (e.g. `src/backend.js` → copied to `public/backend.js`, plus a `<script src="backend.js"></script>` line ahead of `app.js` in `src/page.html`).
 
 If `use()` returns `null` for a capability, the app degrades gracefully:
@@ -43,7 +45,7 @@ Collections and their documents (one JSON object per document):
 One generic table keeps the app unchanged:
 
 ```sql
-create table public.docs (
+create table public.ot_docs (
   collection text not null,
   id         text not null,
   data       jsonb not null,
@@ -52,12 +54,12 @@ create table public.docs (
 );
 alter table public.docs enable row level security;
 -- Replace with your real rules (e.g. only signed-in company users):
-create policy "team read"  on public.docs for select using (auth.role() = 'authenticated');
-create policy "team write" on public.docs for all    using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
-alter publication supabase_realtime add table public.docs;
+create policy "team read"  on public.ot_docs for select using (auth.role() = 'authenticated');
+create policy "team write" on public.ot_docs for all    using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+alter publication supabase_realtime add table public.ot_docs;
 ```
 
-- `onSnapshot(c)`: `select id, data from docs where collection = c`, then subscribe to Realtime changes filtered on `collection=eq.c` and re-emit the full list.
+- `onSnapshot(c)`: `select id, data from ot_docs where collection = c`, then subscribe to Realtime changes filtered on `collection=eq.c` and re-emit the full list.
 - `doc(id).set(obj)`: `upsert({ collection: c, id, data: obj })`.
 - `doc(id).delete()`: `delete().match({ collection: c, id })`.
 - To migrate existing data, load `data/ordertrack-database.json` from an OrderTrack backup: every array entry becomes one row (`collection` = array name, `id` = entry `id`, `data` = the entry). Masters are rows in collection `masters` with id = master type.

@@ -290,11 +290,11 @@ async function setup(opts = {}) {
     await page.click('[data-act="importSheet"]'); const SHEET = process.env.OT_SHEET || path.join(__dirname, 'seed', 'Order_sheet.xlsx'); if (!fs.existsSync(SHEET)) { ok('12 skipped: set OT_SHEET to an order sheet .xlsx', true); return; } await page.setInputFiles('#imf', SHEET); await page.waitForSelector('#imp .kvs', { timeout: 30000 });
     const t = await page.locator('#imp').innerText(); const nums = (t.match(/\d+/g) || []).map(Number);
     ok('12a sheet parsed into orders with product lines', nums[0] > 100 && nums[1] >= nums[0] && nums[3] > 0, t.replace(/\s+/g, ' ').slice(0, 140));
-    await page.locator('.modal footer button', { hasText: 'Import orders' }).click(); await wait(1500);
+    await page.locator('#imS').uncheck(); await page.locator('.modal footer button', { hasText: 'Import orders' }).click(); await wait(1500);
     const r = await ev(n0 => { const nw = S.orders.slice(n0); return { n: nw.length, multi: nw.filter(o => o.items.length > 1).length, started: nw.filter(o => o.projectId).length }; }, n0);
     ok('12b imported as Not Started orders (no batches yet)', r.n > 100 && r.started === 0 && r.multi > 0, JSON.stringify(r));
     await page.click('[data-ftab="orders:open"]'); await wait(300);
-    const startBtn = page.locator('[data-act="startOrder"]').first(); const oid = await startBtn.getAttribute('data-o'); await startBtn.click(); await wait(400);
+    ok('12d bulk Start button offered', await page.locator('[data-act="startAll"]').count() === 1); const oid = await ev(() => S.orders.find(o => !o.projectId && o.items.length > 1).id); await ev(id => ACT.startOrder({ dataset: { o: id } }), oid); await wait(400);
     const s = await ev(oid => { const o = O(oid); return { pid: !!o.projectId, b: S.batches.filter(b => b.projectId === o.projectId).length, it: o.items.length }; }, oid);
     ok('12c Start creates batches for every product', s.pid && s.b === s.it, JSON.stringify(s));
   });

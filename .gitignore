@@ -6,3 +6,6 @@ tests/e2e/out/
 tests/e2e/node_modules
 *.log
 .DS_Store
+tests/e2e/out-vercel/
+tests/e2e/test-po-v.pdf
+tests/e2e/pdf-expect-v.json

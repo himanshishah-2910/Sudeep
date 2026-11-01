@@ -17,7 +17,10 @@ Orders are traced by **PO / SO number**. Each product in an order runs on its ow
 | `src/misc.js` | Overview, Master Data (incl. workflow templates), AI assistant, events, startup |
 | `scripts/build.mjs` | Builds `public/index.html` + `public/app.js` |
 | `vercel.json` | Vercel build settings (`npm run build` → `public/`) |
-| `tests/e2e/` | Playwright end-to-end suite (87 checks) |
+| `src/backend.js` | Supabase + AI adapter for the own-domain build |
+| `api/` | Vercel Functions: `config.js`, `ai.js` (OpenAI gpt-4.1) |
+| `supabase/setup.sql` | Database table, Realtime, storage bucket, access rules |
+| `tests/e2e/` | Playwright suites: `run.js` (88 checks, app) and `vercel.js` (22 checks, own-domain build with Supabase + AI path) |
 | `docs/` | Deployment and backend integration guides |
 
 ## Run locally
@@ -31,11 +34,20 @@ npx serve public       # or any static server
 
 See **[docs/DEPLOY.md](docs/DEPLOY.md)**: GitHub → Vercel → your own domain.
 
-## Important: backend on your own domain
+## Backend on your own domain (connected)
 
-On claude.ai, OrderTrack uses the platform's shared database, file storage and AI. On Vercel those are not present, so out of the box the app runs in **"This browser only"** mode: each person's data stays in their own browser.
+| Piece | Where | Notes |
+| --- | --- | --- |
+| Shared database | Supabase project `pugkpvtdcnpwrvmtbamz`, table `public.ot_docs` | One row per record; Realtime on, so every open dashboard updates live, including edits made in the Supabase table editor |
+| Files (PO/SO PDFs, QC forms, COAs) | Supabase Storage bucket `ordertrack` | |
+| AI assistant + PO/SO PDF reading | `api/ai.js` (Vercel Function) → OpenAI **gpt-4.1** | Key read from the Vercel environment variable `open_ai_sudeep_key`; it never reaches the browser |
+| Browser adapter | `src/backend.js` | Implements the app's `window.claude.use()` interface on top of the above |
+| Public config | `api/config.js` | Supabase URL + publishable key, AI on/off, seed sheet path |
+| Database setup | `supabase/setup.sql` | Already applied; safe to re-run |
 
-To make it a shared team app on your domain, connect a database (e.g. Supabase) and an AI endpoint (your Anthropic API key). The app talks to these through one small interface, described in **[docs/INTEGRATION.md](docs/INTEGRATION.md)**. No screen code needs to change.
+The first time the site opens on an empty database it loads default master data and offers **Load order sheet data**, which imports the sheet shipped in `seed/` through the normal importer (orders, masters, optional workflow start).
+
+How changes flow: data edits on the website are written straight to Supabase (no GitHub involved). Code changes are pushed to GitHub, and Vercel redeploys automatically.
 
 ## Tests
 

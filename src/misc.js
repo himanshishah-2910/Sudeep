@@ -74,7 +74,7 @@ AFTER.overview = () => {
   chart($('#c_status'), 'doughnut', { labels: sts.map(s => `${s} (${ps.filter(p => pStatus(p) === s).length})`), datasets: [{ data: sts.map(s => ps.filter(p => pStatus(p) === s).length), backgroundColor: col, borderWidth: 2, borderColor: tok('--surface') }] }, { cutout: '60%', plugins: { legend: { position: 'right', labels: { color: tok('--muted') } } } });
 };
 function emptyStart() {
-  return `<section class="panel"><div class="empty" style="padding:60px 20px"><b style="font-size:24px">Start with your orders</b><span style="max-width:560px">Punch a PO by hand or from its PDF, or import the Excel order sheet. Each product in an order runs on its own workflow and batches until dispatch.</span>
+  return `${seedOffer()}<section class="panel"><div class="empty" style="padding:60px 20px"><b style="font-size:24px">Start with your orders</b><span style="max-width:560px">Punch a PO by hand or from its PDF, or import the Excel order sheet. Each product in an order runs on its own workflow and batches until dispatch.</span>
   <div class="row" style="justify-content:center"><button class="btn" type="button" data-act="newOrder">${ico('plus')} Punch order</button><button class="btn ghost" type="button" data-act="importSheet">${ico('up')} Import order sheet</button></div></div></section>`;
 }
 
@@ -93,6 +93,7 @@ const MDEF = {
   lines: ['Manufacturing Line Master', 'Production', [['name', 'Line'], ['unit', 'Unit'], ['capacity', 'Capacity']]],
   machines: ['Machine / Resource Master', 'Production', [['name', 'Machine / resource'], ['line', 'Line'], ['notes', 'Notes']]],
   _templates: ['Workflow Templates', 'Production', []],
+  _data: ['Backup, restore & defaults', 'Data tools', []],
   stages: ['Workflow Stage Master', 'Production', [['name', 'Stage name'], ['type', 'Stage type']]],
   qctests: ['QC Test Master', 'Quality', [['name', 'Test name'], ['parameter', 'Parameter'], ['spec', 'Specification / standard']]],
   qachecks: ['QA Master', 'Quality', [['name', 'QA check']]],
@@ -102,13 +103,14 @@ const MDEF = {
 };
 const allMdefs = () => Object.assign({}, MDEF, Object.fromEntries(M('customDefs').map(d => [d.key, [d.label, 'Custom', [['name', 'Name'], ['value', 'Value'], ['notes', 'Notes']]]])));
 const MDRAFT = {};
-const mCount = k => k === '_templates' ? S.templates.length : (k === 'stages' ? stageMaster() : M(k)).length;
+const mCount = k => k === '_templates' ? S.templates.length : k === '_data' ? S.orders.length : (k === 'stages' ? stageMaster() : M(k)).length;
 RENDER.masters = () => {
   const defs = allMdefs(); const t = defs[FLT.masters.type] ? FLT.masters.type : 'customers'; const [label, , fields] = defs[t];
   const groups = {}; Object.entries(defs).forEach(([k, d]) => (groups[d[1]] = groups[d[1]] || []).push([k, d[0]]));
   const side = `<section class="panel"><header><h3>Masters</h3></header><div class="pb list" style="gap:2px"><div style="margin-bottom:6px">${combo({ opts: Object.entries(defs).map(([k, d]) => ({ v: k, l: d[0], sub: d[1] })), value: '', ph: 'Search masters…', strict: true, id: 'mjump', onPick: o => { if (o.v) { FLT.masters.type = o.v; FLT.masters.q = ''; render(true); } } })}</div>${Object.entries(groups).map(([g, its]) => `<div class="eyebrow" style="margin:10px 0 4px">${esc(g)}</div>${its.map(([k, l]) => `<button type="button" class="link mlink ${k === t ? 'on' : ''}" data-mtype="${esc(k)}">${esc(l)}<span class="mono muted" style="font-size:12px">${mCount(k)}</span></button>`).join('')}`).join('')}
       <button class="btn ghost sm" type="button" data-act="newMaster" style="margin-top:12px">${ico('plus')} New custom master</button></div></section>`;
   if (t === '_templates') return `<div class="grid mgrid">${side}${templatesPanel()}</div>`;
+  if (t === '_data') return `<div class="grid mgrid">${side}${dataPanel()}</div>`;
   if (!MDRAFT[t]) MDRAFT[t] = clone(t === 'stages' ? stageMaster() : M(t));
   const rows = MDRAFT[t]; const q = (FLT.masters.q || '').toLowerCase();
   const dirty = JSON.stringify(rows) !== JSON.stringify(t === 'stages' ? stageMaster() : M(t));
@@ -160,6 +162,47 @@ ACT.mSave = () => {
   putMaster(t, rows); MDRAFT[t] = clone(rows); log(`${label} updated (${rows.length} records)`, ''); toast(`${label} saved`);
 };
 ACT.newMaster = () => openModal({ title: 'New custom master', body: field({ k: 'label', label: 'Master name, e.g. Storage Location Master', req: true }, ''), actions: [{ label: 'Create', run: md => { const l = val(md, 'label'); if (!l) return false; const key = 'x_' + l.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 30); if (allMdefs()[key]) { toast('That master already exists.'); return false; } putMaster('customDefs', M('customDefs').concat([{ key, label: l }])); FLT.masters.type = key; MDRAFT[key] = []; } }] });
+
+/* ===================== data tools: defaults, backup, restore ===================== */
+const DEFAULT_MASTERS = {
+  lines: [['PR1', 'PR1'], ['PR2', 'PR2'], ['PR3', 'PR3'], ['PR4', 'PR4'], ['PR5', 'PR5'], ['PROTH', 'PROTH']].map(([name, unit]) => ({ name, unit, capacity: '' })),
+  units: ['PR1', 'PR2', 'PR3', 'PR4', 'PR5', 'PROTH'].map(name => ({ name })),
+  departments: ['Operations', 'Planning', 'Marketing', 'Stores', 'Manufacturing', 'Quality Control', 'Quality Assurance', 'Dispatch'].map(name => ({ name })),
+  stages: DEFAULT_STAGES,
+  qctests: [['Assay', 'Purity (%)', '98.0 – 102.0'], ['Loss on Drying', 'LOD (%)', 'NMT 1.0'], ['Heavy Metals', 'Pb (ppm)', 'NMT 2'], ['Particle Size', 'D90 (µm)', 'NMT 75'], ['Bulk Density', 'g/ml', '0.6 – 0.9'], ['Microbial Limit', 'TAMC (cfu/g)', 'NMT 1000'], ['Appearance', 'Visual', 'As per specification']].map(([name, parameter, spec]) => ({ name, parameter, spec })),
+  qachecks: ['BMR Review', 'Label Verification', 'COA Review', 'Deviation Check', 'Packing Inspection'].map(name => ({ name })),
+  containers: ['20ft', '40ft', '40 Reefer', 'LCL Shipment', 'AIR Shipment'].map(name => ({ name })),
+  shipmodes: ['BY SEA', 'By Air', 'By Courier', 'By Road'].map(name => ({ name })),
+  settings: [{ auto: true }]
+};
+const DEFAULT_TEMPLATES = [{ id: 'T-STD', name: 'Standard flow', isDefault: true, stages: DEFAULT_FLOW.map(n => ({ name: n, type: n === 'Manufacturing' ? 'mfg' : stageType(n) })) },
+  { id: 'T-EXP', name: 'Export with sampling', isDefault: false, stages: ['Order Punching', 'Material In', 'Manufacturing', 'QC', 'QA', 'Customer Sampling', 'Ready for Dispatch', 'Dispatch', 'Project Completion'].map(n => ({ name: n, type: n === 'Manufacturing' ? 'mfg' : n === 'Customer Sampling' ? 'qa' : stageType(n) })) }];
+function seedDefaults(onlyMissing = true) {
+  let n = 0; Object.entries(DEFAULT_MASTERS).forEach(([k, v]) => { if (!onlyMissing || !M(k).length) { putMaster(k, v); n++; } });
+  if (!S.templates.length) DEFAULT_TEMPLATES.forEach(t => { put('templates', t); n++; });
+  return n;
+}
+function dataPanel() {
+  return `<section class="panel" style="min-width:0"><header><h3>Backup, restore &amp; defaults</h3><span class="muted" style="font-size:13px">${MODE === 'live' ? 'Connected to the shared database' : 'This browser only'}</span></header><div class="pb" style="display:flex;flex-direction:column;gap:18px">
+    <div class="row" style="align-items:flex-start;gap:16px"><div style="flex:1;min-width:240px"><b>Download a full backup</b><div class="muted" style="font-size:13px">Every order, batch, remark, template and master as one JSON file.</div></div>${DL ? '<button class="btn ghost" type="button" data-act="backupDl">' + ico('dl') + ' Download backup</button>' : '<span class="muted">Downloads are not available here.</span>'}</div>
+    <div class="row" style="align-items:flex-start;gap:16px"><div style="flex:1;min-width:240px"><b>Restore from a backup</b><div class="muted" style="font-size:13px">Choose <span class="mono">ordertrack-database.json</span> from an OrderTrack backup (for example the one taken from the claude.ai version). Records with the same number are replaced; nothing else is deleted.</div></div><label class="btn ghost" style="cursor:pointer">${ico('up')} Choose backup file<input type="file" id="restoreIn" accept=".json,application/json" hidden></label></div>
+    <div class="row" style="align-items:flex-start;gap:16px"><div style="flex:1;min-width:240px"><b>Load default master data</b><div class="muted" style="font-size:13px">Adds production lines, departments, workflow stages and templates, QC tests, QA checks, containers and shipment modes, only where a master is empty.</div></div><button class="btn ghost" type="button" data-act="seedDefaults">Load defaults</button></div>
+    <div id="restoreOut"></div></div></section>`;
+}
+ACT.seedDefaults = () => { const n = seedDefaults(true); toast(n ? `Loaded ${n} default master list${n > 1 ? 's' : ''}` : 'Every master already has data'); };
+ACT.backupDl = async () => {
+  const out = { exportedAt: nowISO(), orders: S.orders, projects: S.projects, batches: S.batches, templates: S.templates, remarks: S.remarks, activity: S.activity, masters: Object.entries(S.masters).map(([id, v]) => Object.assign({ id }, v)) };
+  try { await DL.save({ filename: `ordertrack-database-${TODAY}.json`, data: new Blob([JSON.stringify(out, null, 1)], { type: 'application/json' }) }); } catch (e) { if (e && e.code !== 'declined') toast('Backup did not complete: ' + (e.message || e.code)); }
+};
+document.addEventListener('change', async e => {
+  if (e.target.id !== 'restoreIn' || !e.target.files[0]) return; const f = e.target.files[0]; e.target.value = '';
+  try {
+    const d = JSON.parse(await f.text()); let n = 0;
+    ['orders', 'projects', 'batches', 'templates', 'remarks', 'activity'].forEach(c => (d[c] || []).forEach(x => { if (!x || !x.id) return; const y = c === 'orders' ? normalizeOrder(clone(x)) : c === 'batches' ? normalizeBatch(clone(x)) : clone(x); put(c, y); n++; }));
+    (d.masters || []).forEach(m => { if (m && m.id) { putMaster(m.id, m.items || []); n++; } });
+    const el = $('#restoreOut'); if (el) el.innerHTML = `<div class="alert s-done"><span>Restored ${n} records from ${esc(f.name)}.</span></div>`; log(`Backup restored: ${n} records from ${f.name}`, ''); toast(`Restored ${n} records`);
+  } catch (err) { toast('Could not read that backup: ' + err.message); }
+});
 
 /* ===================== AI Assistant (answers from live data, traced by PO / SO) ===================== */
 let CHAT = [], CHAT_BUSY = false, CHAT_CTL = null;
@@ -298,7 +341,7 @@ async function boot() {
   if (!DB) { MODE = 'local'; setConn('local'); loadLocal(); render(true); return; }
   MODE = 'live'; setConn('live');
   const need = new Set(['orders', 'projects', 'batches', 'masters', 'templates']); let first = true;
-  const ready = k => { need.delete(k); if (first && !need.size) { first = false; render(true); } else if (!first) scheduleRender(); };
+  const ready = k => { need.delete(k); if (first && !need.size) { first = false; if (!S.templates.length && !M('stages').length && !M('lines').length) { seedDefaults(true); toast('New database: default master data loaded. Add customers and products, or import your order sheet.'); } render(true); } else if (!first) scheduleRender(); };
   const norm = { orders: normalizeOrder, batches: normalizeBatch };
   ['orders', 'projects', 'batches', 'templates', 'remarks'].forEach(c => DB.collection(c).limit(1000).onSnapshot(snap => { S[c] = snap.docs.map(d => { const x = Object.assign(clone(d.data()), { id: d.id }); return norm[c] ? norm[c](x) : x; }); ready(c); }, err => { toast(`Could not load ${c}: ${err.message || err.code}`); ready(c); }));
   DB.collection('masters').limit(200).onSnapshot(snap => { const m = {}; snap.docs.forEach(d => { m[d.id] = clone(d.data()); }); S.masters = m; Object.keys(MDRAFT).forEach(k => { if (VIEW !== 'masters' || k !== FLT.masters.type) delete MDRAFT[k]; }); ready('masters'); }, () => ready('masters'));

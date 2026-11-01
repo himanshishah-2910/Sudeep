@@ -82,7 +82,7 @@ const bOrder = b => pOrder(P(b.projectId));
 const bItem = b => itemOf(bOrder(b), b.itemId);
 const oRef = o => { if (!o) return '—'; const a = []; if (o.poNo) a.push('PO ' + o.poNo); if (o.soNo) a.push('SO ' + o.soNo); return a.join(' · ') || '—'; };
 const pRef = p => oRef(pOrder(p));
-const refOfPid = id => { const p = P(id); return p ? pRef(p) : id; };
+const refOfPid = id => { const p = P(id); return p ? pRef(p) : 'a deleted order'; };
 const oQty = o => sum(items(o), i => (i.openQty === '' || i.openQty === undefined || i.openQty === null) ? i.poQty : i.openQty);
 const oPoQty = o => sum(items(o), i => i.poQty);
 const oProducts = o => uniq(items(o).map(i => i.productName)).join(' + ');

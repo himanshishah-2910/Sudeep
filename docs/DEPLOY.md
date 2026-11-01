@@ -31,15 +31,16 @@ Tips
 - Only change the one website record. Do not move nameservers unless you also copy your email (MX) and verification (TXT) records.
 - If Cloudflare manages your DNS, set the record to **DNS only** (grey cloud) while Vercel verifies it.
 
-## 3. Environment variables (when you connect the backend)
+## 3. Environment variables
 
-Set these in **Settings → Environment Variables**, then redeploy. Names are suggestions; match whatever your integration code reads.
-
-| Variable | Used for | Expose to browser? |
+| Variable | Used for | Notes |
 | --- | --- | --- |
-| `SUPABASE_URL` | Database + file storage | Yes (public) |
-| `SUPABASE_ANON_KEY` | Database + file storage, protected by Row Level Security | Yes (public) |
-| `ANTHROPIC_API_KEY` | AI: PDF autofill + assistant | **Never.** Server-side only, inside a Vercel Function |
+| `open_ai_sudeep_key` | AI assistant + PO/SO PDF reading (OpenAI gpt-4.1) | **Required for AI.** Server-side only (read by `api/ai.js`) |
+| `OPENAI_MODEL` | optional model override | default `gpt-4.1` |
+| `SUPABASE_URL`, `SUPABASE_ANON_KEY` (or `NEXT_PUBLIC_…` / `…_PUBLISHABLE_KEY`) | Database + storage | Optional: falls back to project `pugkpvtdcnpwrvmtbamz` and its publishable key |
+| `OT_SEED_SHEET` | path of the one-time seed sheet | default `/seed/sheet-7f3k9q2m.xlsx` |
+
+After changing variables, redeploy (Deployments → ⋯ → Redeploy).
 
 See [INTEGRATION.md](INTEGRATION.md) for the interface the app expects.
 

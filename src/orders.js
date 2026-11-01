@@ -1,6 +1,6 @@
 /* ===================== Orders: list, punch form (multi-product), PDF autofill, import ===================== */
 function nextId(prefix, arr, start) { let n = start; const ids = new Set(arr.map(x => x.id)); arr.forEach(x => { const m = String(x.id).match(/(\d+)$/); if (m && String(x.id).startsWith(prefix)) n = Math.max(n, +m[1] + 1); }); while (ids.has(prefix + n)) n++; return prefix + n; }
-const orderState = o => !o.projectId ? 'Not Started' : (o.status || 'Open');
+const orderState = o => { const s = o.status || 'Open'; if (['Dispatched', 'Closed'].includes(s)) return s; if (!o.projectId) return s === 'On Hold' ? 'On Hold' : 'Not Started'; return s; };
 const ostPill = o => { const s = orderState(o); return pill({ 'Not Started': 'pending', Open: 'progress', Dispatched: 'done', Closed: 'done', 'On Hold': 'pending' }[s] || 'notstarted', s); };
 const itemsCell = o => items(o).map(i => `<div class="it"><b>${esc(i.productName || '—')}</b><span class="muted mono">${esc(i.productCode)}${i.grade ? ' · ' + esc(i.grade) : ''} · ${kg(i.poQty)} kg</span></div>`).join('');
 
@@ -26,8 +26,8 @@ RENDER.orders = () => {
   EXPORTS.orders = exportRows('Orders', cols, rows);
   const notStarted = rows.filter(o => !o.projectId);
   return `<div class="row"><div class="tabs" role="tablist">${[['open', 'Open orders'], ['hold', 'On hold'], ['closed', 'Dispatched / closed'], ['all', 'All orders']].map(([k, l]) => `<button type="button" role="tab" data-ftab="orders:${k}" class="${tab === k ? 'on' : ''}">${l}</button>`).join('')}</div><span class="spacer"></span>
-    <button class="btn ghost" type="button" data-act="importSheet">${ico('up')} Import order sheet</button><button class="btn" type="button" data-act="newOrder">${ico('plus')} Punch order</button></div>
-    ${filterBar('orders', [{ k: 'cust', label: 'Customer', opts: () => uniq(S.orders.map(o => o.customer)).sort() }, { k: 'prod', label: 'Product code', opts: () => uniq(S.orders.flatMap(o => items(o).map(i => i.productCode))).sort() }, { k: 'type', label: 'Order type', opts: ['Domestic', 'Export'] }, { k: 'unit', label: 'Unit / PR', opts: () => uniq(S.orders.map(o => o.unit)).sort() }, { k: 'sales', label: 'Sales person', opts: () => uniq(S.orders.map(o => o.salesPerson)).sort() }])}
+    <button class="btn ghost" type="button" data-act="importSheet">${ico('up')} Import order sheet</button>${DL ? `<button class="btn ghost" type="button" data-act="exportSheet">${ico('dl')} Export order sheet</button>` : ''}<button class="btn" type="button" data-act="newOrder">${ico('plus')} Punch order</button></div>
+    ${seedOffer()}${filterBar('orders', [{ k: 'cust', label: 'Customer', opts: () => uniq(S.orders.map(o => o.customer)).sort() }, { k: 'prod', label: 'Product code', opts: () => uniq(S.orders.flatMap(o => items(o).map(i => i.productCode))).sort() }, { k: 'type', label: 'Order type', opts: ['Domestic', 'Export'] }, { k: 'unit', label: 'Unit / PR', opts: () => uniq(S.orders.map(o => o.unit)).sort() }, { k: 'sales', label: 'Sales person', opts: () => uniq(S.orders.map(o => o.salesPerson)).sort() }])}
     <section class="panel">${table('orders', cols, rows, { sort: 2, dir: -1, colFilters: true, click: o => 'order:' + o.id, tools: (notStarted.length ? `<button class="btn ok sm" type="button" data-act="startAll">Start ${notStarted.length} imported order${notStarted.length > 1 ? 's' : ''}</button>` : '') + exportTools('orders'), empty: 'No orders here', emptyHint: '<span>Click Punch order to enter a new PO.</span>' })}</section>`;
 };
 ACT.newOrder = () => OPEN.order('');
@@ -81,9 +81,9 @@ OPEN.order = id => {
     ${sec(...ORDER_SECTIONS[2])}${sec(...ORDER_SECTIONS[3])}`;
   const save = md => {
     const r = readForm(md); const its2 = readItems(md).filter(i => i.productCode || i.poQty);
-    const miss = ALL_ORDER_FIELDS.filter(f => f.req && !r[f.k]).map(f => f.label);
+    const miss = ALL_ORDER_FIELDS.filter(f => f.req && !r[f.k] && (!id || f.k === 'poNo' || f.k === 'customer')).map(f => f.label);
     if (!its2.length) miss.push('at least one product');
-    its2.forEach((i, n) => { if (!i.productCode) miss.push(`product code (product ${n + 1})`); if (!(+i.poQty > 0)) miss.push(`PO qty (product ${n + 1})`); if (!i.tplId) miss.push(`workflow (product ${n + 1})`); if (!i.line) miss.push(`production line (product ${n + 1})`); });
+    its2.forEach((i, n) => { if (!i.productCode) miss.push(`product code (product ${n + 1})`); if (!(+i.poQty > 0 || +i.openQty > 0)) miss.push(`PO or open qty (product ${n + 1})`); if (!i.tplId) miss.push(`workflow (product ${n + 1})`); if (!i.line) miss.push(`production line (product ${n + 1})`); });
     if (miss.length) { toast('Please fill: ' + miss.join(', ')); return false; }
     const key = `${r.poNo}|${r.soNo || ''}`.toLowerCase();
     const dup = S.orders.find(x => x.id !== o.id && `${x.poNo}|${x.soNo || ''}`.toLowerCase() === key);
@@ -112,7 +112,7 @@ OPEN.order = id => {
     $('#addItem', md).onclick = () => { const w = document.createElement('div'); const unit = val(md, 'unit'); w.innerHTML = itemRowHTML({ id: '', nBatches: 1, line: unit ? unitToLine(unit) : '', tplId: tplById('').id }, false); $('#itemRows', md).appendChild(w.firstElementChild); numberRows(md); const last = $$('.itemrow', md).slice(-1)[0]; last.scrollIntoView({ block: 'nearest' }); $('[data-ik="productCode"]', last).focus(); };
     md.addEventListener('click', e => { const b = e.target.closest('[data-rmitem]'); if (!b) return; if ($$('.itemrow', md).length === 1) { toast('An order needs at least one product.'); return; } b.closest('.itemrow').remove(); numberRows(md); });
     const pin = $('#pdfIn', md); if (pin) pin.addEventListener('change', async e => { const f = e.target.files[0]; e.target.value = ''; if (!f) return; const doc = await pdfAutofill(md, f); if (doc) pendingPdf = doc; });
-  }, actions: [{ label: id ? 'Save order' : 'Punch order & start workflows', cls: id ? '' : 'ok', id: 'saveOrder', run: md => save(md) }] });
+  }, actions: [{ label: id ? 'Save order' : 'Punch order & start workflows', cls: id ? '' : 'ok', id: 'saveOrder', run: md => save(md) }].concat(id ? [{ label: 'Delete order', cls: 'danger', id: 'delOrder', run: () => { setTimeout(() => ACT.deleteOrder({ dataset: { o: id } }), 30); } }] : []) });
 };
 
 /* ---------- make an order live: project + batches per product ---------- */
@@ -122,7 +122,7 @@ function startOrder(oid, quiet) {
   if (!pid) { pid = nextId('PRJ-', S.projects, 26101); put('projects', { id: pid, orderId: oid, status: 'Active', remarks: '', docs: [], createdAt: TODAY }); o.projectId = pid; o.status = o.status || 'Open'; put('orders', o); }
   const have = new Set(pBatches(pid).map(b => b.itemId)); let made = 0;
   items(o).forEach(it => { if (!have.has(it.id)) made += createBatchesForItem(o, it, pid); });
-  if (made) log(`${oRef(o)} is live: ${made} batch${made > 1 ? 'es' : ''} created across ${items(o).length} product${items(o).length > 1 ? 's' : ''}`, pid);
+  if (made && !quiet) log(`${oRef(o)} is live: ${made} batch${made > 1 ? 'es' : ''} created across ${items(o).length} product${items(o).length > 1 ? 's' : ''}`, pid);
   if (!quiet && made) toast(`${oRef(o)} started: ${made} batches`);
   return pid;
 }
@@ -161,7 +161,9 @@ async function pdfAutofill(md, file) {
   let doc = null;
   try {
     const { text, images } = await readPdf(file);
-    if (images.length) { const lim = await SAMPLE.limits().catch(() => null); if (!lim || !lim.images) { set(`<div class="alert s-rejected">This PDF is a scanned image and image reading is not available here. Type the order in by hand.</div>`); return null; } }
+    const pdfOk = !!SAMPLE.acceptsPdf && file.size <= 3 * 1024 * 1024;
+    const pdfPart = pdfOk ? { name: file.name, dataUrl: await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = rej; fr.readAsDataURL(file); }) } : null;
+    if (images.length && !pdfPart) { const lim = await SAMPLE.limits().catch(() => null); if (!lim || !lim.images) { set(`<div class="alert s-rejected">This PDF is a scanned image and image reading is not available here. Type the order in by hand.</div>`); return null; } }
     set(`<div class="banner info">AI is reading the order from <b>${esc(file.name)}</b>… this takes up to a minute.</div>`);
     const list = (n, a) => `${n}: ${a.slice(0, 400).join(' | ')}`;
     const prompt = `You extract purchase-order / sales-order data for a manufacturing order-entry form.
@@ -182,8 +184,8 @@ ${list('Packing', M('packing').map(x => x.name))}
 ${list('Sales persons', M('salespersons').map(x => x.name))}
 
 DOCUMENT TEXT:
-${text || '(scanned document — read the attached page images)'}`;
-    const data = await SAMPLE.json(prompt, images.length ? { images } : {});
+${text || '(scanned document — read the attached PDF / page images)'}`;
+    const data = await SAMPLE.json(prompt, pdfPart ? { pdf: pdfPart } : images.length ? { images } : {});
     if (!data || typeof data !== 'object') throw new Error('The AI did not return order data.');
     const filled = [], missing = [];
     const try1 = (k, v, label) => { if (v === undefined || v === null || v === '') return; if (setField(md, k, v)) filled.push(label); else missing.push(`${label}: “${v}”`); };
@@ -197,7 +199,7 @@ ${text || '(scanned document — read the attached page images)'}`;
     if (its.length) {
       const rowsEl = $('#itemRows', md); $$('.itemrow', rowsEl).forEach(r => { if (!$('[data-ik="productCode"]', r).readOnly) r.remove(); });
       its.forEach(i => {
-        const p = M('products').find(x => x.code.toLowerCase() === String(i.productCode || '').toLowerCase()) || M('products').find(x => (x.name || '').toLowerCase() === String(i.productName || '').toLowerCase());
+        const p = M('products').find(x => x.code.toLowerCase() === String(i.productCode || '').toLowerCase()) || (i.productName ? M('products').find(x => x.name && x.name.toLowerCase() === String(i.productName).toLowerCase()) : null);
         const pk = M('packing').find(x => x.name.toLowerCase() === String(i.packing || '').toLowerCase());
         const unit = val(md, 'unit');
         const w = document.createElement('div'); w.innerHTML = itemRowHTML({ id: '', productCode: p ? p.code : '', productName: p ? p.name : '', grade: p ? p.grade : '', poQty: +i.qtyKg || '', openQty: +i.qtyKg || '', packing: pk ? pk.name : '', specialReq: i.specialReq || '', nBatches: 1, line: unit ? unitToLine(unit) : '', tplId: tplById('').id }, false); rowsEl.appendChild(w.firstElementChild);
@@ -216,7 +218,7 @@ ${text || '(scanned document — read the attached page images)'}`;
 }
 
 /* ---------- Excel import: sheet rows grouped into multi-product orders by PO + SO ---------- */
-const HMAP = { month: 'month', planningteamremarks: 'planRemarks', exportdomestic: 'orderType', unitpr: 'unit', salesperson: 'salesPerson', ponumber: 'poNo', podate: 'poDate', sonumber: 'soNo', sodate: 'soDate', soupdatedate: 'soUpdate', explantdate: 'exPlant', rowdeliverydate: 'rowDelivery', rawdeliverydate: 'rowDelivery', customername: 'customer', locationcountry: 'location', productcode: 'productCode', grade: 'grade', productname: 'productName', poquantitykgs: 'poQty', openquantitykgs: 'openQty', marketingremarks: 'mktRemarks', remarksspecialrequirement: 'specialReq', packing: 'packing', palletformation: 'pallet', tentativesamplingdate: 'tentSampling', actualsamplingdate: 'actSampling', batchnumber: 'batchNo', coareleaseddate: 'coaDate', readinessdateofsudeep: 'plannedReady', actaulreadinessdate: 'actualReady', actualreadinessdate: 'actualReady', actauldispatchdate: 'actualDispatch', actualdispatchdate: 'actualDispatch', remarksplanningteam: 'planRemarks2', noofsotoinvoicedays: 'soToInvoiceDays', opendispatchclosedonhold: 'status', invoiceno: 'invoiceNo', invoicedate: 'invoiceDate', shiptocode: 'shipToName', incoterms: 'incoterms', portofdischarge: 'port', typeofshipmentseaair: 'shipmentType', containersize: 'containerSize', paymentterms: 'paymentTerms' };
+const HMAP = { month: 'month', planningteamremarks: 'planRemarks', exportdomestic: 'orderType', unitpr: 'unit', salesperson: 'salesPerson', ponumber: 'poNo', podate: 'poDate', sonumber: 'soNo', sodate: 'soDate', soupdatedate: 'soUpdate', explantdate: 'exPlant', rowdeliverydate: 'rowDelivery', rawdeliverydate: 'rowDelivery', plannedreadinessdate: 'plannedReady', customername: 'customer', locationcountry: 'location', productcode: 'productCode', grade: 'grade', productname: 'productName', poquantitykgs: 'poQty', openquantitykgs: 'openQty', marketingremarks: 'mktRemarks', remarksspecialrequirement: 'specialReq', packing: 'packing', palletformation: 'pallet', tentativesamplingdate: 'tentSampling', actualsamplingdate: 'actSampling', batchnumber: 'batchNo', coareleaseddate: 'coaDate', readinessdateofsudeep: 'plannedReady', actaulreadinessdate: 'actualReady', actualreadinessdate: 'actualReady', actauldispatchdate: 'actualDispatch', actualdispatchdate: 'actualDispatch', remarksplanningteam: 'planRemarks2', noofsotoinvoicedays: 'soToInvoiceDays', opendispatchclosedonhold: 'status', invoiceno: 'invoiceNo', invoicedate: 'invoiceDate', shiptocode: 'shipToName', incoterms: 'incoterms', portofdischarge: 'port', typeofshipmentseaair: 'shipmentType', containersize: 'containerSize', paymentterms: 'paymentTerms' };
 const DATEK = new Set(['poDate', 'soDate', 'soUpdate', 'exPlant', 'rowDelivery', 'tentSampling', 'actSampling', 'coaDate', 'plannedReady', 'actualReady', 'actualDispatch', 'invoiceDate']);
 function normCell(k, v) {
   if (v === null || v === undefined) return '';
@@ -227,12 +229,12 @@ function normCell(k, v) {
   if (k === 'status') s = /dispatch/i.test(s) ? 'Dispatched' : /close/i.test(s) ? 'Closed' : /hold/i.test(s) ? 'On Hold' : 'Open';
   return s;
 }
-ACT.importSheet = () => {
+ACT.importSheet = (el, presetFile) => {
   let parsed = [];
   openModal({ title: 'Import order sheet', wide: true, body: `<p style="margin:0">Choose the Excel order sheet (.xlsx). Columns are matched by header name. Rows with the same PO and SO become one order with several products. Orders already in OrderTrack (same PO + SO) are skipped.</p>
     <label class="btn ghost" style="width:max-content;cursor:pointer">${ico('up')} Choose Excel file<input id="imf" type="file" accept=".xlsx,.xls,.csv" hidden></label><div id="imp"></div>`,
-    onOpen: md => $('#imf', md).addEventListener('change', async e => {
-      const f = e.target.files[0]; if (!f) return; const out = $('#imp', md); out.innerHTML = '<span class="muted">Reading…</span>';
+    onOpen: md => { const parse = async f => {
+      if (!f) return; const out = $('#imp', md); out.innerHTML = `<span class="muted">Reading ${esc(f.name || 'sheet')}…</span>`;
       try {
         const wb = XLSX.read(await f.arrayBuffer(), { cellDates: true }); const ws = wb.Sheets[wb.SheetNames[0]]; const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null });
         const hi = aoa.findIndex(r => r && r.some(c => /customer\s*name/i.test(String(c || '')))); if (hi < 0) throw new Error('No "Customer Name" header row found.');
@@ -245,18 +247,21 @@ ACT.importSheet = () => {
           const o = groups.get(key); const it = { id: 'L' + (o.items.length + 1), tplId: '', line: unitToLine(x.unit), nBatches: 1 }; ITEM_KEYS.forEach(k => it[k] = x[k] ?? ''); it.poQty = +it.poQty || 0; it.openQty = it.openQty === '' ? it.poQty : +it.openQty || 0; o.items.push(it); });
         parsed = [...groups.values()];
         out.innerHTML = `<div class="kvs"><div><dt>Orders ready</dt><dd class="num big">${parsed.length}</dd></div><div><dt>Product lines</dt><dd class="num big">${sum(parsed, o => o.items.length)}</dd></div><div><dt>Rows skipped (already in OrderTrack)</dt><dd class="num big">${dupRows}</dd></div><div><dt>Multi-product orders</dt><dd class="num big">${parsed.filter(o => o.items.length > 1).length}</dd></div></div>
-          ${parsed.length > 600 ? `<p class="banner">Only the first 600 orders will be imported in one go; run the import again for the rest.</p>` : ''}
-          <label class="row" style="font-size:14px"><input type="checkbox" id="imM" checked style="width:auto"> Add new customers, products, grades, salespersons, packing types and ports to Master Data</label>
-          <p class="muted" style="margin:0;font-size:13px">Imported orders arrive as <b>Not Started</b>. Start them from the Orders list when you are ready; that creates their batches and workflows.</p>`;
+          ${parsed.length > 2000 ? `<p class="banner">Only the first 2000 orders will be imported in one go; run the import again for the rest.</p>` : ''}
+          <div class="kvs"><div><dt>Sheet status Open / blank</dt><dd class="num big">${parsed.filter(o => !['Dispatched', 'Closed', 'On Hold'].includes(o.status)).length}</dd></div><div><dt>Dispatched / Closed</dt><dd class="num big">${parsed.filter(o => ['Dispatched', 'Closed'].includes(o.status)).length}</dd></div><div><dt>On hold</dt><dd class="num big">${parsed.filter(o => o.status === 'On Hold').length}</dd></div></div>
+          <label class="row" style="font-size:14px"><input type="checkbox" id="imM" checked style="width:auto"> Add new customers, products, grades, salespersons, packing types, ports, incoterms and payment terms to Master Data</label>
+          <label class="row" style="font-size:14px"><input type="checkbox" id="imS" checked style="width:auto"> Start workflows now for orders the sheet marks Open (creates their batches so they show in PPC and the departments)</label>
+          <p class="muted" style="margin:0;font-size:13px">Every column keeps the sheet's value. Orders the sheet marks Dispatched or Closed are kept as records with that status; On Hold orders stay on hold.</p>`;
       } catch (err) { out.innerHTML = `<div class="alert s-rejected">Could not read this file: ${esc(err.message)}</div>`; }
-    }),
+    }; $('#imf', md).addEventListener('change', e => parse(e.target.files[0])); if (presetFile) parse(presetFile); },
     actions: [{ label: 'Import orders', run: md => {
       if (!parsed.length) { toast('Choose a sheet with new rows first.'); return false; }
-      const addM = $('#imM', md) && $('#imM', md).checked; const rows = parsed.slice(0, 600);
+      const addM = $('#imM', md) && $('#imM', md).checked; const startNow = $('#imS', md) && $('#imS', md).checked; const rows = parsed.slice(0, 2000);
       if (addM) mergeMasters(rows);
       let n = +nextId('ORD-', S.orders, 2601).split('-')[1];
-      rows.forEach(o => { o.id = 'ORD-' + (n++); o.createdAt = TODAY; put('orders', o); });
-      log(`Order sheet imported: ${rows.length} orders, ${sum(rows, o => o.items.length)} product lines`, ''); toast(`${rows.length} orders imported`); FLT.orders.tab = 'open'; go('orders');
+      rows.forEach(o => { o.id = 'ORD-' + (n++); o.createdAt = TODAY; o.items.forEach(i => { i.tplId = i.tplId || tplById('').id; }); put('orders', o); });
+      let started = 0; if (startNow) rows.filter(o => !['Dispatched', 'Closed', 'On Hold'].includes(o.status)).forEach(o => { startOrder(o.id, true); started++; });
+      log(`Order sheet imported: ${rows.length} orders, ${sum(rows, o => o.items.length)} product lines${started ? `, ${started} started` : ''}`, ''); toast(`${rows.length} orders imported${started ? ` · ${started} started` : ''}`); FLT.orders.tab = 'all'; go('orders');
     } }] });
 };
 function mergeMasters(rows) {
@@ -268,3 +273,31 @@ function mergeMasters(rows) {
   add('packing', its.map(i => ({ name: i.packing })), 'name'); add('units', rows.map(o => ({ name: o.unit })), 'name');
   add('ports', rows.map(o => ({ name: o.port })), 'name'); add('incoterms', rows.map(o => ({ name: o.incoterms })), 'name'); add('payment', rows.map(o => ({ name: o.paymentTerms })), 'name');
 }
+
+/* ---------- export in the original order-sheet layout (one row per product) ---------- */
+const SHEET_COLS = [['MONTH', o => o.month], ['Planning Team Remarks', o => o.planRemarks], ['Export/ Domestic', o => o.orderType], ['UNIT / PR', o => o.unit], ['Sales Person', o => o.salesPerson], ['PO Number', o => o.poNo], ['PO Date', o => o.poDate], ['SO number', o => o.soNo], ['SO Date', o => o.soDate], ['SO update date', o => o.soUpdate], ['Ex Plant Date', o => o.exPlant], ['Raw Delivery Date', o => o.rowDelivery], ['Customer Name', o => o.customer], ['Location / Country', o => o.location], ['Product Code', (o, i) => i.productCode], ['GRADE', (o, i) => i.grade], ['Product Name', (o, i) => i.productName], ['PO Quantity (kgs)', (o, i) => +i.poQty || ''], ['Open Quantity (kgs)', (o, i) => +i.openQty || ''], ['MARKETING REMARKS', (o, i) => i.mktRemarks], ['Remarks/ special requirement', (o, i) => i.specialReq], ['Packing', (o, i) => i.packing], ['PALLET FORMATION', (o, i) => i.pallet], ['Tentative sampling date', o => o.tentSampling], ['Actual Sampling date', o => o.actSampling], ['Batch Number', (o, i) => o.projectId ? pBatches(o.projectId).filter(b => b.itemId === i.id).map(b => b.id).join(', ') : i.batchNo], ['COA RELEASED DATE', o => o.coaDate], ['Planned Readiness Date', o => o.plannedReady], ['Actual Readiness Date', o => o.actualReady], ['Actual Dispatch Date', o => o.actualDispatch], ['REMARKS PLANNING TEAM', o => o.planRemarks2], ['No. of SO to Invoice Days', o => o.soToInvoiceDays], ['Open/Dispatch/Closed/Onhold', o => orderState(o)], ['Invoice no.', o => o.invoiceNo], ['Invoice Date', o => o.invoiceDate], ['Ship-to Code', o => o.shipToName], ['Incoterms', o => o.incoterms], ['Port of Discharge', o => o.port], ['Type of shipment Sea/Air', o => o.shipmentType], ['CONTAINER SIZE', o => o.containerSize], ['Payment Terms', o => o.paymentTerms]];
+ACT.exportSheet = async () => {
+  if (!DL) return; const rows = [SHEET_COLS.map(c => c[0])];
+  S.orders.slice().sort(by(o => o.soDate || o.poDate || '', -1)).forEach(o => items(o).forEach(i => rows.push(SHEET_COLS.map(c => { const v = c[1](o, i); return v === undefined || v === null ? '' : v; }))));
+  try { const ws = XLSX.utils.aoa_to_sheet(rows); const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Order sheet'); const out = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }); await DL.save({ filename: `Order-sheet-${TODAY}.xlsx`, data: new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }) }); toast(`Exported ${rows.length - 1} product rows`); }
+  catch (e) { if (e && e.code !== 'declined') toast('Export did not complete: ' + (e.message || e.code || 'unknown')); }
+};
+/* ---------- delete an order with everything under it ---------- */
+ACT.deleteOrder = el => {
+  const o = O(el.dataset.o); if (!o) return; const pid = o.projectId; const bs = pid ? pBatches(pid) : []; const rms = pid ? pRemarks(pid) : [];
+  openModal({ title: `Delete ${oRef(o)}`, body: `<div class="alert s-rejected"><span>This permanently deletes the order <b>${esc(oRef(o))}</b> (${esc(o.customer)}), its ${items(o).length} product${items(o).length > 1 ? 's' : ''}, <b>${bs.length} batch${bs.length === 1 ? '' : 'es'}</b> with their workflow, QC, QA and dispatch records, and ${rms.length} remark${rms.length === 1 ? '' : 's'}. It cannot be undone.</span></div>
+    <label class="f"><span>Type the PO number <b>${esc(o.poNo)}</b> to confirm</span><input id="delConfirm" autocomplete="off"></label>`,
+    actions: [{ label: 'Delete permanently', cls: 'danger', id: 'delYes', run: md => {
+      if ($('#delConfirm', md).value.trim() !== String(o.poNo).trim()) { toast('The PO number does not match.'); return false; }
+      bs.forEach(b => removeRec('batches', b.id)); rms.forEach(r => removeRec('remarks', r.id)); if (pid) removeRec('projects', pid); removeRec('orders', o.id);
+      log(`Order ${oRef(o)} (${o.customer}) deleted with ${bs.length} batches`, ''); if (drawerFn) closeDrawer(); toast(`${oRef(o)} deleted`);
+    } }] });
+};
+
+/* ---------- one-time load of the order sheet shipped with the deployment ---------- */
+const seedUrl = () => (window.OT_BACKEND && OT_BACKEND.cfg && OT_BACKEND.cfg.seedSheet) || '';
+const seedOffer = () => MODE === 'live' && !S.orders.length && seedUrl() ? `<div class="alert s-progress"><span><b>Your shared database is empty.</b> Load the order sheet that was set up with this deployment: every PO becomes an order (rows with the same PO + SO become one multi-product order), and customers, products and other masters are created from it.</span><span class="spacer"></span><button class="btn ok" type="button" data-act="loadSeed">Load order sheet data</button></div>` : '';
+ACT.loadSeed = async () => {
+  try { const r = await fetch(seedUrl(), { cache: 'no-store' }); if (!r.ok) throw new Error('The sheet file was not found on the server (' + r.status + ').'); const b = await r.blob(); ACT.importSheet(null, new File([b], 'Order sheet.xlsx', { type: b.type })); }
+  catch (e) { toast('Could not load the sheet: ' + e.message); }
+};
