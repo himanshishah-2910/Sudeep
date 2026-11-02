@@ -213,6 +213,65 @@ const batchFull = b => ({ batch: b.id, order: refOfPid(b.projectId), customer: b
   qc_tests: (b.qcTests || []).map(t => ({ test: t.name, parameter: t.parameter, spec: t.spec, result: t.result, status: t.status, by: t.by, date: t.date, analysis: t.analysis })), qa: { status: b.qa.status, by: b.qa.by, date: b.qa.date, observations: b.qa.observations }, coa: { no: b.coa.no, status: b.coa.status, released: b.coa.released },
   shipments: (b.shipments || []).map(s => ({ id: s.id, qty_kg: s.qty, invoice: s.invoiceNo, invoice_date: s.invoiceDate, container: s.containerNo, size: s.containerSize, dispatch_date: s.dispatchDate, status: s.status })), history: (b.history || []).slice(-25).map(h => ({ at: h.at, text: deRef(h.text) })) });
 const findProject = id => { const q = String(id || '').trim().toLowerCase().replace(/^(po|so)[\s:#-]*/, ''); return S.projects.find(p => { const o = pOrder(p); return String(o.poNo || '').toLowerCase() === q || String(o.soNo || '').toLowerCase() === q; }) || S.projects.find(p => { const o = pOrder(p); return String(o.poNo || '').toLowerCase().includes(q) || String(o.soNo || '').toLowerCase().includes(q); }); };
+/* ---------- assistant updates: propose → user confirms once → apply → report ---------- */
+let AI_PENDING = null; // { id, ops, lines, at (CHAT length when proposed), state }
+const AI_STATUS = { completed: 'done', complete: 'done', done: 'done', finished: 'done', 'in progress': 'progress', progress: 'progress', started: 'progress', running: 'progress', pending: 'pending', 'not started': 'notstarted', notstarted: 'notstarted', reset: 'notstarted', rejected: 'rejected', failed: 'rejected' };
+const AI_STAGE = { qc: 'qc', 'quality control': 'qc', qa: 'qa', 'quality assurance': 'qa', coa: 'qa', manufacturing: 'mfg', production: 'mfg', mfg: 'mfg', material: 'material', 'material in': 'material', 'raw material': 'material', ready: 'ready', 'ready for dispatch': 'ready', dispatch: 'dispatch', dispatched: 'dispatch', completion: 'done', 'project completion': 'done', 'order punching': 'order' };
+function aiTargets(target, product) {
+  const q = String(target || '').trim(); const ql = q.toLowerCase().replace(/^(po|so|batch)[\s:#-]*/, '');
+  const b = S.batches.find(x => x.id.toLowerCase() === ql); if (b) return { batches: [b], label: `batch ${b.id}` };
+  const p = S.projects.find(p => { const o = pOrder(p); return String(o.poNo || '').toLowerCase() === ql || String(o.soNo || '').toLowerCase() === ql; });
+  if (!p) throw new Error(`No order or batch matches "${q}" exactly. Ask the user for the exact PO, SO or batch number.`);
+  let bs = pBatches(p.id); const pr = String(product || '').trim().toLowerCase();
+  if (pr) { bs = bs.filter(x => { const i = bItem(x); return [i.productCode, i.productName, i.grade].some(v => String(v || '').toLowerCase().includes(pr)); }); if (!bs.length) throw new Error(`Order ${pRef(p)} has no product matching "${product}".`); }
+  if (!bs.length) throw new Error(`Order ${pRef(p)} has no batches yet (its workflow has not been started).`);
+  return { batches: bs, project: p, label: pRef(p) };
+}
+const aiStageIdx = (L, stage) => { const s = String(stage || '').trim().toLowerCase(); let i = L.findIndex(x => x.name.toLowerCase() === s); if (i >= 0) return i; const t = AI_STAGE[s]; if (!t) return -1; i = L.findIndex(x => x.type === t && x.status !== 'done'); return i >= 0 ? i : L.findIndex(x => x.type === t); };
+function aiPropose(inp) {
+  const changes = Array.isArray(inp.changes) ? inp.changes : []; if (!changes.length) throw new Error('No changes given.');
+  const ops = [], lines = [], errs = [];
+  changes.forEach(c => {
+    try {
+      const T = aiTargets(c.target, c.product);
+      if (c.order_status) { if (!T.project) throw new Error('Order status needs a PO or SO number.'); const st = /hold/i.test(c.order_status) ? 'On Hold' : 'Active'; ops.push({ kind: 'order', pid: T.project.id, status: st }); lines.push(`${T.label}: order → ${st}`); return; }
+      const st = AI_STATUS[String(c.status || '').trim().toLowerCase()]; if (!st) throw new Error(`Unknown status "${c.status}" (use Completed, In Progress, Pending, Not Started or Rejected).`);
+      T.batches.forEach(b => { const L = activeLine(b); const i = aiStageIdx(L, c.stage); if (i < 0) throw new Error(`Batch ${b.id} has no stage "${c.stage}". Its stages: ${L.map(x => x.name).join(', ')}.`);
+        ops.push({ kind: 'stage', bid: b.id, stage: L[i].name, idx: i, status: st, note: c.note || '' }); lines.push(`${refOfPid(b.projectId)} · batch ${b.id} (${bItem(b).productName || bItem(b).productCode}): ${L[i].name} ${ST[L[i].status]} → ${ST[st]}`); });
+    } catch (e) { errs.push(e.message); }
+  });
+  if (!ops.length) throw new Error(errs.join(' '));
+  AI_PENDING = { id: uid('U'), ops, lines, at: CHAT.length, state: 'pending' };
+  return { proposal_id: AI_PENDING.id, planned_changes: lines, problems: errs, instruction: 'Nothing has been changed yet. A confirmation card is shown to the user. List these planned changes and ask the user to confirm (Confirm button or reply yes). Only after the user confirms in a NEW message, call apply_confirmed_update.' };
+}
+function aiSetStage(b, L, i, st, note, rep) {
+  const s = L[i]; const from = ST[s.status];
+  if (st === 'done' || st === 'progress' || st === 'pending') for (let k = 0; k < i; k++) if (L[k].status !== 'done') { const f = ST[L[k].status]; L[k].status = 'done'; L[k].actual = L[k].actual || TODAY; L[k].done = L[k].alloc || L[k].done; L[k].completedAt = nowISO(); rep.push(`${L[k].name}: ${f} → Completed (earlier stage)`); }
+  if (st === 'done') { if (s.status !== 'done') { completeStage(b, L, i, note || 'updated by AI assistant'); rep.push(`${s.name}: ${from} → Completed`); const n = L.find((x, k) => k > i && x.status !== 'done'); if (n && n.status !== 'notstarted') rep.push(`${n.name}: now ${ST[n.status]} (automatic hand-off)`); } else rep.push(`${s.name}: already Completed`); }
+  else { if (s.status === st) { rep.push(`${s.name}: already ${ST[st]}`); return; } s.status = st; if (st === 'notstarted') { s.actual = ''; s.done = 0; } else s.startedAt = s.startedAt || nowISO(); if (note) s.comment = note;
+    if (st === 'progress' || st === 'pending') L.forEach((x, k) => { if (k > i && (x.status === 'progress' || x.status === 'pending')) { x.status = 'notstarted'; rep.push(`${x.name}: → Not Started (after the current stage)`); } });
+    addHist(b, `${s.name} set to ${ST[st]}${note ? ' — ' + note : ''} (AI assistant)`); rep.push(`${s.name}: ${from} → ${ST[st]}`); }
+  if (s.type === 'qa') b.qa.status = st === 'done' ? 'Approved' : st === 'rejected' ? 'Rejected' : st === 'progress' ? 'In Review' : b.qa.status;
+  if (s.type === 'mfg' && st === 'done') b.produced = Math.max(+b.produced || 0, b.qty);
+  syncBatchDates(b); finalize(b);
+}
+function aiApply(id) {
+  const P0 = AI_PENDING; if (!P0 || P0.id !== id || P0.state !== 'pending') throw new Error('There is no pending update with that id. Propose the change again.');
+  const per = {}, order = []; const bs = {};
+  P0.ops.forEach(op => {
+    if (op.kind === 'order') { const p = clone(P(op.pid)); if (!p) return; const from = pStatus(p); p.status = op.status; put('projects', p); const o = clone(pOrder(p)); if (o.id) { o.status = op.status === 'On Hold' ? 'On Hold' : (o.status === 'On Hold' ? 'Open' : o.status); put('orders', o); } log(`${pRef(p)} set to ${op.status} by the AI assistant`, p.id); order.push(`${pRef(p)}: order ${from} → ${op.status}`); return; }
+    const b = bs[op.bid] || (bs[op.bid] = clone(B(op.bid))); if (!b) return; const L = activeLine(b); let i = L.findIndex(x => x.name === op.stage); if (i < 0) i = op.idx;
+    aiSetStage(b, L, i, op.status, op.note, per[op.bid] = per[op.bid] || []);
+  });
+  Object.values(bs).forEach(b => saveBatch(b, `AI assistant updated batch ${b.id}: ${(per[b.id] || []).filter(x => !/already/.test(x)).join('; ')}`));
+  P0.state = 'applied';
+  const report = [...order, ...Object.keys(per).map(bid => { const b = B(bid); return `${refOfPid(b.projectId)} · batch ${bid} (${bItem(b).productName || bItem(b).productCode}) — ${per[bid].join('; ')} · now at ${phaseLabel(b)}`; })];
+  P0.report = report; return { applied: true, updated_at: nowISO(), report };
+}
+const aiReportText = r => `**Data updated** (${fmtD(TODAY)})\n` + r.map(x => '- ' + x).join('\n');
+ACT.aiConfirm = () => { try { const r = aiApply(AI_PENDING && AI_PENDING.id); CHAT.push({ role: 'assistant', content: aiReportText(r.report) }); toast('Update applied'); } catch (e) { toast(e.message); } render(true); };
+ACT.aiCancel = () => { if (AI_PENDING && AI_PENDING.state === 'pending') { AI_PENDING.state = 'cancelled'; CHAT.push({ role: 'assistant', content: 'Cancelled. Nothing was changed.' }); } render(true); };
+const aiCard = m => { const P0 = m.card; if (!P0) return ''; return `<div class="aicard"><div class="eyebrow">${P0.state === 'applied' ? 'Applied' : P0.state === 'cancelled' ? 'Cancelled' : 'Confirm these changes'}</div><ul>${P0.lines.map(l => `<li>${esc(l)}</li>`).join('')}</ul>${P0.state === 'pending' ? `<div class="row"><button class="btn ok sm" type="button" data-act="aiConfirm">Confirm and update</button><button class="btn ghost sm" type="button" data-act="aiCancel">Cancel</button></div>` : ''}</div>`; };
 const AI_TOOLS = [
   { name: 'plant_summary', description: 'Current plant-wide figures: orders by status, batches by current stage, delayed orders, batches running on a rework line, failed QC tests, per-line planned vs produced kg, pending dispatch kg, unread remark count. Use for any overall or count question.', execute: () => {
     const act = S.batches.filter(b => !['completed', 'hold'].includes(phaseKey(b))); const st = {}; act.forEach(b => st[phaseLabel(b)] = (st[phaseLabel(b)] || 0) + 1);
@@ -239,21 +298,28 @@ const AI_TOOLS = [
     execute: i => { const q = String(i.batch || '').trim().toLowerCase(); const b = S.batches.find(x => x.id.toLowerCase() === q) || S.batches.find(x => x.id.toLowerCase().includes(q)); if (!b) throw new Error(`No batch matches "${i.batch}".`); return batchFull(b); } },
   { name: 'customer_quantities', description: 'Per customer: ordered, produced, dispatched and pending kg, with the PO/SO references. Optional customer filter (partial name).',
     inputSchema: { type: 'object', properties: { customer: { type: 'string' } } },
-    execute: i => { const m = {}; S.projects.forEach(p => { const o = pOrder(p); if (!o.id) return; if (i.customer && !String(o.customer).toLowerCase().includes(String(i.customer).toLowerCase())) return; const c = m[o.customer] = m[o.customer] || { customer: o.customer, orders: [], ordered_kg: 0, produced_kg: 0, dispatched_kg: 0 }; c.orders.push(pRef(p)); c.ordered_kg += pQty(p); pBatches(p.id).forEach(b => { c.produced_kg += +b.produced || 0; c.dispatched_kg += dispatchedQty(b); }); }); return Object.values(m).map(c => Object.assign(c, { pending_dispatch_kg: Math.max(0, c.ordered_kg - c.dispatched_kg) })); } }
+    execute: i => { const m = {}; S.projects.forEach(p => { const o = pOrder(p); if (!o.id) return; if (i.customer && !String(o.customer).toLowerCase().includes(String(i.customer).toLowerCase())) return; const c = m[o.customer] = m[o.customer] || { customer: o.customer, orders: [], ordered_kg: 0, produced_kg: 0, dispatched_kg: 0 }; c.orders.push(pRef(p)); c.ordered_kg += pQty(p); pBatches(p.id).forEach(b => { c.produced_kg += +b.produced || 0; c.dispatched_kg += dispatchedQty(b); }); }); return Object.values(m).map(c => Object.assign(c, { pending_dispatch_kg: Math.max(0, c.ordered_kg - c.dispatched_kg) })); } },
+  { name: 'propose_update', description: 'Prepare changes to workflow stage statuses or order status. Does NOT change anything: it shows the user a confirmation card. Use when the user asks to mark / change / update a stage (e.g. "QC completed, QA in progress for SO 2063"). Several changes can be sent at once.',
+    inputSchema: { type: 'object', properties: { changes: { type: 'array', items: { type: 'object', properties: { target: { type: 'string', description: 'Exact PO number, SO number or batch number' }, product: { type: 'string', description: 'Optional product code/name to limit to one product of the order' }, stage: { type: 'string', description: 'Stage name or type: Material In, Manufacturing (or line name like PR1), QC, QA, Ready for Dispatch, Dispatch, Project Completion' }, status: { type: 'string', enum: ['Completed', 'In Progress', 'Pending', 'Not Started', 'Rejected'] }, order_status: { type: 'string', enum: ['On Hold', 'Active'], description: 'Instead of stage/status: put the whole order on hold or resume it' }, note: { type: 'string' } }, required: ['target'] } } }, required: ['changes'] },
+    execute: i => { const r = aiPropose(i); const cur = CHAT[CHAT.length - 1]; if (cur && cur.role === 'assistant') cur.card = AI_PENDING; return r; } },
+  { name: 'apply_confirmed_update', description: 'Apply a proposal from propose_update. Call ONLY after the user has explicitly confirmed (said yes / confirm) in a message sent after the proposal was shown. Returns the data-updated report to show the user.',
+    inputSchema: { type: 'object', properties: { proposal_id: { type: 'string', description: 'Optional; the latest pending proposal is applied' } } },
+    execute: i => { if (!AI_PENDING || AI_PENDING.state !== 'pending') throw new Error('There is no pending update. Propose the change again.'); const lastU = CHAT.map((m, k) => m.role === 'user' ? k : -1).filter(k => k >= 0).pop(); if (!(lastU >= AI_PENDING.at)) throw new Error('The user has not confirmed yet. Ask them to confirm first.'); if (!/\b(yes|yeah|yep|ok|okay|confirm|confirmed|go ahead|do it|proceed|haan|ha|sure)\b/i.test(CHAT[lastU].content)) throw new Error('The latest user message is not a confirmation. Ask the user to confirm.'); return aiApply(AI_PENDING.id); } }
 ];
 const AI_RULES = () => `You are the project assistant inside OrderTrack, a manufacturing order-to-dispatch system. Orders are identified by PO number and SO number; each order can have several products, each with its own workflow and batches. When a batch is sent to rework, the latest rework line (RW1, RW2…) drives the batch. Today is ${TODAY}.
 Rules:
 - Answer only from data returned by the tools. Call a tool before answering any question about orders, batches, quality, remarks or dispatch.
 - If the data does not contain the answer, say it is not recorded in the system. Never guess or invent PO/SO numbers, batch numbers, dates, quantities or names.
 - Refer to orders by PO / SO number, never by internal IDs. Quantities are kilograms.
+- You can update the system: for any request to change a stage or order status, call propose_update (it changes nothing and shows a confirmation card), list the planned changes, and ask for confirmation once. Apply with apply_confirmed_update only after the user confirms in a new message, then reply with a short "Data updated" report listing every change from the tool result. Never say something was updated unless apply_confirmed_update returned applied.
 - Be concise: lead with the direct answer, then short bullet points. Plain text with "- " bullets; **bold** allowed; no tables.`;
 const mdLite = t => esc(t).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
 RENDER.assistant = () => {
   const rwB = S.batches.find(b => (b.reworks || []).length) || S.batches[0]; const o1 = S.orders.find(o => o.projectId) || {};
   const sugg = ['Which orders are currently in QC?', 'How many batches are pending in manufacturing?', 'Which batches have failed QC?', 'What is the production status of PR1?', 'Which orders are delayed?', 'What is the pending dispatch quantity?', 'Which batches are running on a rework line?', `Show the complete history of batch ${rwB ? rwB.id : 'PR1-2700'}`, `What is the status of ${o1.poNo ? 'PO ' + o1.poNo : 'my latest order'}?`];
   if (!SAMPLE) return `<section class="panel"><div class="empty" style="padding:48px 20px"><b>The assistant needs the Claude connection</b><span style="max-width:560px">Open this page signed in on claude.ai to ask questions in plain language. Every answer is looked up live from orders, batches, QC/QA records, remarks and shipments.</span></div></section>`;
-  return `<section class="panel chat"><header><h3>AI Project Assistant</h3><span class="muted" style="font-size:13px">Answers come only from live system data</span><span class="spacer"></span>${CHAT.length ? '<button class="btn ghost sm" type="button" data-act="chatClear">New conversation</button>' : ''}</header>
-    <div class="msgs" id="msgs">${CHAT.length ? CHAT.map(m => `<div class="msg ${m.role === 'user' ? 'u' : 'a'}">${m.tl ? `<div class="tl">${esc(m.tl)}</div>` : ''}${m.role === 'user' ? esc(m.content) : mdLite(m.content || '')}</div>`).join('') : `<div class="empty"><b>Ask about any PO, SO, batch or line</b><span>Try one of these:</span><div class="sugg">${sugg.map(s => `<button type="button" data-ask="${esc(s)}">${esc(s)}</button>`).join('')}</div></div>`}</div>
+  return `<section class="panel chat"><header><h3>AI Project Assistant</h3><span class="muted" style="font-size:13px">Answers from live data · can update stages after you confirm</span><span class="spacer"></span>${CHAT.length ? '<button class="btn ghost sm" type="button" data-act="chatClear">New conversation</button>' : ''}</header>
+    <div class="msgs" id="msgs">${CHAT.length ? CHAT.map(m => `<div class="msg ${m.role === 'user' ? 'u' : 'a'}">${m.tl ? `<div class="tl">${esc(m.tl)}</div>` : ''}${m.role === 'user' ? esc(m.content) : mdLite(m.content || '')}${aiCard(m)}</div>`).join('') : `<div class="empty"><b>Ask about any PO, SO, batch or line</b><span>Try one of these:</span><div class="sugg">${sugg.map(s => `<button type="button" data-ask="${esc(s)}">${esc(s)}</button>`).join('')}</div></div>`}</div>
     <form class="composer" id="chatF"><input id="chatI" placeholder="e.g. What is the status of ${esc(o1.poNo ? 'PO ' + o1.poNo : 'PO 4562144774')}?" autocomplete="off" ${CHAT_BUSY ? 'disabled' : ''}><button class="btn" type="submit" ${CHAT_BUSY ? 'hidden' : ''}>Ask</button>${CHAT_BUSY ? '<button class="btn ghost" type="button" data-act="chatStop">Stop</button>' : ''}</form></section>`;
 };
 AFTER.assistant = () => { const m = $('#msgs'); if (m) m.scrollTop = m.scrollHeight; const f = $('#chatF'); if (f) f.onsubmit = e => { e.preventDefault(); ask($('#chatI').value); }; };
@@ -261,7 +327,7 @@ async function ask(q) {
   q = String(q || '').trim(); if (!q || CHAT_BUSY || !SAMPLE) return;
   CHAT.push({ role: 'user', content: q }); const a = { role: 'assistant', content: '', tl: 'Thinking…' }; CHAT.push(a); CHAT_BUSY = true; render(true);
   const bubbleEl = () => $$('#msgs .msg.a').slice(-1)[0];
-  const upd = () => { const el = bubbleEl(); if (el) { el.innerHTML = `${a.tl ? `<div class="tl">${esc(a.tl)}</div>` : ''}${mdLite(a.content)}`; const m = $('#msgs'); m.scrollTop = m.scrollHeight; } };
+  const upd = () => { const el = bubbleEl(); if (el) { el.innerHTML = `${a.tl ? `<div class="tl">${esc(a.tl)}</div>` : ''}${mdLite(a.content)}${aiCard(a)}`; const m = $('#msgs'); m.scrollTop = m.scrollHeight; } };
   const turns = CHAT.slice(0, -1).filter(m => m.content).map((m, i) => ({ role: m.role, content: i === 0 ? AI_RULES() + '\n\nQuestion: ' + m.content : m.content }));
   const tools = AI_TOOLS.map(t => Object.assign({}, t, { execute: (inp, ctx) => { a.tl = `Looking up ${t.name.replace(/_/g, ' ')}…`; upd(); return t.execute(inp || {}, ctx); } }));
   CHAT_CTL = new AbortController();

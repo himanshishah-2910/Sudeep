@@ -24,6 +24,10 @@ global.fetch = async (url, init) => {
     const X = JSON.parse(fs.readFileSync(path.join(__dirname, 'pdf-expect-v.json')));
     return reply({ role: 'assistant', content: JSON.stringify({ poNo: 'PO/TEST/7781', soNo: '55210', poDate: '2026-11-01', customer: X.customer, rawDeliveryDate: '2026-11-28', incoterms: X.inco, paymentTerms: X.pay, items: [{ productCode: X.p1, qtyKg: 2000 }, { productCode: X.p2, qtyKg: 1500 }, { productCode: 'ZZZ-UNKNOWN-9', qtyKg: 500 }] }) });
   }
+  if (last.role === 'tool' && /proposal_id/.test(last.content)) return reply({ role: 'assistant', content: 'Planned changes ready. Please confirm.' });
+  if (last.role === 'tool' && /"applied":true/.test(last.content)) return reply({ role: 'assistant', content: 'Data updated: ' + last.content.slice(0, 400) });
+  if (last.role === 'user' && /^yes\b/i.test(String(last.content))) return reply({ role: 'assistant', content: null, tool_calls: [{ id: 'call_a', type: 'function', function: { name: 'apply_confirmed_update', arguments: '{}' } }] });
+  { const m = String(last.content || '').match(/UPDATE (\S+): QC done, QA in progress/); if (m) return reply({ role: 'assistant', content: null, tool_calls: [{ id: 'call_p', type: 'function', function: { name: 'propose_update', arguments: JSON.stringify({ changes: [{ target: m[1], stage: 'QC', status: 'Completed' }, { target: m[1], stage: 'QA', status: 'In Progress' }] }) } }] }); }
   if (last.role === 'tool') return reply({ role: 'assistant', content: 'From OrderTrack data: ' + last.content.slice(0, 300) });
   const q = typeof last.content === 'string' ? last.content : '';
   const po = (q.split('Question:').pop().match(/PO\s+(\S+?)\??$/) || [])[1];
@@ -142,6 +146,16 @@ const FAKE_SB = `(() => {
     await page.waitForFunction(() => !CHAT_BUSY, null, { timeout: 20000 }); await wait(200);
     const ans = await page.locator('#msgs .msg.a').last().innerText(); const c0 = openaiCalls[0] || { body: {} };
     ok('G1 assistant uses gpt-4.1 with your key, tools, and live data', c0.body.model === 'gpt-4.1' && c0.auth === 'Bearer sk-test-sudeep-123' && (c0.body.tools || []).some(t => t.function.name === 'get_order') && ans.includes(anyPo), ans.slice(0, 140));
+    // assistant updates: propose → confirm once → applied + report
+    const tgt = await ev(() => { const b = S.batches.find(b => phaseKey(b) === 'mfg' && pBatches(b.projectId).length === 1 && /^[A-Za-z0-9-]+$/.test(bOrder(b).soNo || '')); return { so: bOrder(b).soNo, bid: b.id }; });
+    await page.click('[data-act="chatClear"]').catch(() => { }); await wait(200);
+    await page.fill('#chatI', `UPDATE ${tgt.so}: QC done, QA in progress`); await page.press('#chatI', 'Enter'); await page.waitForFunction(() => !CHAT_BUSY, null, { timeout: 20000 }); await wait(300);
+    const before = await ev(bid => phaseLabel(B(bid)), tgt.bid); const card = await page.locator('.aicard').count();
+    ok('G2 update request shows a confirmation card and changes nothing yet', card === 1 && before === 'Manufacturing', before + ' / card ' + card);
+    await page.fill('#chatI', 'yes, go ahead'); await page.press('#chatI', 'Enter'); await page.waitForFunction(() => !CHAT_BUSY, null, { timeout: 20000 }); await wait(800);
+    const aft = await ev(bid => { const b = B(bid); const L = activeLine(b); const st = t => ST[L.find(s => s.type === t).status]; const sb = JSON.parse(localStorage.getItem('fakesb')).batches[bid]; return { mfg: st('mfg'), qc: st('qc'), qa: st('qa'), phase: phaseLabel(b), saved: sb.stages.find(s => s.type === 'qa').status }; }, tgt.bid);
+    const rep = await page.locator('#msgs .msg.a').last().innerText();
+    ok('G3 after one confirmation: QC completed, QA in progress, saved to Supabase, report shown', aft.mfg === 'Completed' && aft.qc === 'Completed' && aft.qa === 'In Progress' && aft.saved === 'progress' && /applied/.test(rep) && rep.includes(tgt.bid), JSON.stringify(aft) + ' ' + rep.slice(0, 160));
     // PDF autofill: the PDF itself goes to gpt-4.1
     await page.click('[data-nav="orders"]'); await wait(300); await page.click('[data-act="newOrder"]'); await wait(300);
     await page.setInputFiles('#pdfIn', path.join(__dirname, 'test-po-v.pdf')); await page.waitForSelector('#pdfStatus .alert', { timeout: 20000 }); await wait(200);
